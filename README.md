@@ -60,3 +60,16 @@ Private / project license TBD by owner.
 `config.example.py` shows the shape of `config.py`.
 
 Never log the bot token.
+
+## New Generation (نسل جدید)
+
+نقطه ورود: `python main.py`
+
+- بدون کشور هوش مصنوعی؛ فقط بازیکن واقعی
+- انتخاب اتمیک کشور + سرمایه اولیه متعادل ۵۰–۱۰۰ میلیون
+- فروشگاه، سبد، انبار، بازار، کمک مالی، صلح، جنگ انتزاعی
+- درآمد روزانه ساعت‌به‌ساعت بررسی می‌شود (تقویم تهران، یک‌بار در روز)
+- پنل مالک: جنگ باز/بسته، هسته‌ای بازی، بیانیه، ریست کامل
+- گروه لاگ هدف: `@warworld3` (نیازمند عضویت ربات)
+
+`config.py` محلی (gitignore) یا env: `BALE_TOKEN`, `OWNER_ID`, `DATABASE_MODE`, `DATABASE_URL`
