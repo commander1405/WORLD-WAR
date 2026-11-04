@@ -47,8 +47,6 @@ def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
         [BTN_WORLD, BTN_REPORT],
         [BTN_ABOUT, BTN_PICK],
     ]
-    if is_owner:
-        rows.append([BTN_OWNER])
     for i, row in enumerate(rows, 1):
         for t in row:
             kb.add(MenuKeyboardButton(t), row=i)
@@ -114,6 +112,63 @@ def register_handlers(bot, app_ctx: dict):
         await game.touch_player(pid, username, display)
         await game.assert_not_banned(pid)
 
+    async def require_membership(pid, message_or_cq, is_callback=False):
+        """Return True if allowed; otherwise send join prompt and return False."""
+        if not await game.membership_enabled():
+            return True
+        if game.is_owner(pid):
+            return True
+        if await game.is_test_mode(pid):
+            return True
+        chats = await game.active_forced_chats()
+        if not chats:
+            return True
+        bot_obj = bot
+        missing = []
+        for ch in chats:
+            cid = ch["chat_id"]
+            ok = False
+            try:
+                # python-bale-bot membership APIs vary by version
+                if hasattr(bot_obj, "get_chat_member"):
+                    m = await bot_obj.get_chat_member(cid, pid)
+                    status = getattr(m, "status", None) or getattr(m, "user_status", None) or ""
+                    ok = str(status).lower() in ("member", "administrator", "creator", "owner", "admin")
+                elif hasattr(bot_obj, "get_chat"):
+                    # cannot verify — treat as need join if API missing
+                    ok = False
+                else:
+                    ok = False
+            except Exception as e:
+                log.warning("membership check failed chat=%s err=%s", cid, e)
+                ok = False
+            if not ok:
+                missing.append(ch)
+        if not missing:
+            return True
+        rows = []
+        for ch in missing:
+            link = ch.get("invite_link") or f"https://ble.ir/{str(ch['chat_id']).lstrip('@')}"
+            rows.append([(f"عضویت در {ch.get('title') or ch['chat_id']}", f"ng:joinlink:{ch['id']}")])
+        rows.append([("✅ تأیید عضویت", "ng:joincheck")])
+        text = (
+            "برای استفاده از ربات، ابتدا در گروه رسمی WORLD WAR عضو شوید.\n"
+            "پس از عضویت، دکمه تأیید را بزنید."
+        )
+        # store links in callback via reply with URL buttons if possible — use text links
+        lines = [text, ""]
+        for ch in missing:
+            link = ch.get("invite_link") or ""
+            lines.append(f"• {ch.get('title') or ch['chat_id']}: {link}")
+        target = message_or_cq
+        if is_callback:
+            msg = getattr(message_or_cq, "message", None)
+            if msg:
+                await msg.reply("\n".join(lines)[:3500], components=ik(rows))
+        else:
+            await reply(message_or_cq, "\n".join(lines), ik(rows))
+        return False
+
     @bot.listen("on_ready")
     async def on_ready():
         log.info("NG UI ready")
@@ -133,6 +188,29 @@ def register_handlers(bot, app_ctx: dict):
             except GameError as e:
                 await reply(message, f"❌ {e}")
                 return
+            owner = game.is_owner(pid)
+            # owner panel commands only
+            if text in ("/admin", "/owner", "/panel"):
+                if not owner:
+                    await reply(message, "❌ دسترسی مجاز نیست.")
+                    return
+                rows = [
+                    [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
+                    [("جنگ باز", "ng:owar:1"), ("جنگ بسته", "ng:owar:0")],
+                    [("هسته‌ای فعال", "ng:onuke:1"), ("هسته‌ای خاموش", "ng:onuke:0")],
+                    [("بیانیه‌ها", "ng:ostmt"), ("درخواست‌های NPT", "ng:onpt")],
+                    [("تنظیم لاگ‌ها", "ng:ologs")],
+                    [("📝 پیام /start", "ng:ostart"), ("ℹ️ درباره ما", "ng:oabout")],
+                    [("🧪 حساب تستی", "ng:otest"), ("⚙️ عضویت اجباری", "ng:oforce")],
+                    [("بن کاربر", "ng:oban"), ("آنبن کاربر", "ng:ounban")],
+                    [("تغییر پول کشور", "ng:omoney")],
+                    [("🔴 ریست کامل جهان", "ng:oreset1")],
+                ]
+                await reply(message, "🛡 پنل مالک / سازمان ملل\nدستورات: /admin /owner /panel", ik(rows))
+                return
+            if text not in ("/start", "شروع", "منو", "menu") and text != BTN_ABOUT:
+                if not await require_membership(pid, message, False):
+                    return
             owner = game.is_owner(pid)
             code = await game.player_country(pid)
 
@@ -369,6 +447,10 @@ def register_handlers(bot, app_ctx: dict):
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
                     return
+                ok, reason = await game.can_attack(code)
+                if not ok:
+                    await reply(message, f"❌ {reason}", main_kb(owner))
+                    return
                 countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
                 rows = [[(f"{c['flag']} {c['name_fa']}", f"ng:atk:{c['country_code']}")] for c in countries]
                 rows.append(back_row())
@@ -433,21 +515,7 @@ def register_handlers(bot, app_ctx: dict):
                 await reply(message, f"⚖ پیمان‌ها\nوضعیت فعلی: {st}", ik(rows))
                 return
 
-            if text == BTN_OWNER and owner:
-                rows = [
-                    [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
-                    [("جنگ باز", "ng:owar:1"), ("جنگ بسته", "ng:owar:0")],
-                    [("هسته‌ای فعال", "ng:onuke:1"), ("هسته‌ای خاموش", "ng:onuke:0")],
-                    [("بیانیه‌ها", "ng:ostmt"), ("درخواست‌های NPT", "ng:onpt")],
-                    [("تنظیم لاگ‌ها", "ng:ologs")],
-                    [("📝 پیام /start", "ng:ostart"), ("ℹ️ درباره ما", "ng:oabout")],
-                    [("بن کاربر", "ng:oban"), ("آنبن کاربر", "ng:ounban")],
-                    [("تغییر پول کشور", "ng:omoney")],
-                    [("🔴 ریست کامل جهان", "ng:oreset1")],
-                    back_row(),
-                ]
-                await reply(message, "🛡 پنل مالک / سازمان ملل", ik(rows))
-                return
+            # Owner panel is command-only: /admin /owner /panel
 
         except Exception:
             log.exception("on_message")
@@ -477,6 +545,15 @@ def register_handlers(bot, app_ctx: dict):
             async def out(text, kb=None):
                 if msg is not None:
                     await msg.reply(str(text)[:3500], components=kb or main_kb(owner))
+
+            # owner callbacks — server-side authorization
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce"):
+                if not owner:
+                    await out("❌ دسترسی مجاز نیست.")
+                    return
+            elif data not in ("ng:home", "ng:joincheck") and not data.startswith("ng:joinlink"):
+                if not await require_membership(pid, cq, True):
+                    return
 
             if data in ("ng:home", "ng:busy"):
                 await out("منوی اصلی" if data == "ng:home" else "این کشور دارای بازیکن است.")
@@ -746,14 +823,22 @@ def register_handlers(bot, app_ctx: dict):
                 if not code:
                     await out("کشور ندارید")
                     return
+                ok, reason = await game.can_attack(code)
+                if not ok:
+                    await out(f"❌ {reason}")
+                    return
                 dst = data.split(":")[-1]
-                rows = [
-                    [("زمینی ۳۰٪", f"ng:fight:{dst}:ground:30"), ("زمینی ۵۰٪", f"ng:fight:{dst}:ground:50")],
-                    [("زمینی ۱۰۰٪", f"ng:fight:{dst}:ground:100")],
-                    [("هوایی ۵۰٪", f"ng:fight:{dst}:air:50"), ("دریایی ۵۰٪", f"ng:fight:{dst}:sea:50")],
-                    back_row(),
-                ]
-                await out(f"عملیات علیه {dst} — نوع و شدت:", ik(rows))
+                rows = []
+                for kind, label in (("ground", "زمینی"), ("air", "هوایی"), ("sea", "دریایی")):
+                    pwr, _ = await game.available_force(code, kind)
+                    if pwr > 0:
+                        rows.append([(f"{label} ۳۰٪", f"ng:fight:{dst}:{kind}:30"), (f"{label} ۵۰٪", f"ng:fight:{dst}:{kind}:50")])
+                        rows.append([(f"{label} ۱۰۰٪", f"ng:fight:{dst}:{kind}:100")])
+                if not rows:
+                    await out("❌ هیچ نیروی قابل‌استفاده‌ای برای انواع حمله ندارید.")
+                    return
+                rows.append(back_row())
+                await out(f"عملیات علیه {dst} — فقط انواع دارای نیرو:", ik(rows))
                 return
             if data.startswith("ng:fight:"):
                 if not code:
@@ -951,6 +1036,74 @@ def register_handlers(bot, app_ctx: dict):
             if data == "ng:oreset2":
                 _pending[pid] = {"kind": "reset_phrase"}
                 await out("عبارت زیر را دقیق بنویسید:\nریست کامل جهان")
+                return
+
+
+            if data == "ng:joincheck":
+                if await require_membership(pid, cq, True):
+                    await out("✅ عضویت تأیید شد. منوی اصلی در دسترس است.", main_kb(owner))
+                return
+            if data.startswith("ng:joinlink:"):
+                chats = await game.list_forced_chats()
+                cid = int(data.split(":")[-1])
+                ch = next((c for c in chats if int(c["id"]) == cid), None)
+                if ch:
+                    await out(f"لینک عضویت:\n{ch.get('invite_link') or ch['chat_id']}")
+                return
+
+            if data == "ng:otest":
+                active = await game.is_test_mode(pid)
+                rows = [
+                    [("🟢 فعال‌سازی تست", "ng:otest:on") if not active else ("🔴 خاموش کردن تست", "ng:otest:off")],
+                    back_row(),
+                ]
+                await out(f"🧪 حساب تستی: {'فعال' if active else 'خاموش'}", ik(rows))
+                return
+            if data == "ng:otest:on":
+                try:
+                    await out(await game.enable_test_mode(pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:otest:off":
+                try:
+                    await out(await game.disable_test_mode(pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+
+            if data == "ng:oforce":
+                enabled = await game.membership_enabled()
+                chats = await game.list_forced_chats()
+                lines = [f"عضویت اجباری: {'فعال' if enabled else 'خاموش'}", ""]
+                for c in chats:
+                    lines.append(f"#{c['id']} {c['title']} ({c['kind']}) {c['chat_id']} {'🟢' if int(c['active']) else '🔴'}")
+                rows = [
+                    [("فعال", "ng:oforce:on"), ("خاموش", "ng:oforce:off")],
+                    [("افزودن @warworld3", "ng:oforce:adddefault")],
+                ]
+                for c in chats:
+                    rows.append([(f"حذف #{c['id']}", f"ng:oforce:del:{c['id']}")])
+                rows.append(back_row())
+                await out("\n".join(lines), ik(rows))
+                return
+            if data == "ng:oforce:on":
+                await out(await game.set_membership_enabled(pid, True))
+                return
+            if data == "ng:oforce:off":
+                await out(await game.set_membership_enabled(pid, False))
+                return
+            if data == "ng:oforce:adddefault":
+                try:
+                    await out(await game.add_forced_chat(pid, "@warworld3", "WORLD WAR", "https://ble.ir/warworld3", "group"))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:oforce:del:"):
+                try:
+                    await out(await game.remove_forced_chat(pid, int(data.split(":")[-1])))
+                except GameError as e:
+                    await out(f"❌ {e}")
                 return
 
         except Exception:

@@ -232,3 +232,71 @@ def test_settings_start_about(tmp_path):
         assert "درباره تست" == await g.get_setting("about_message")
         await db.close()
     run(_t())
+
+
+def test_attack_requires_forces(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "atk0")
+        await g.claim(1, "US")
+        await g.claim(2, "DE")
+        with pytest.raises(GameError):
+            await g.attack("US", "DE", "ground", 100, 1)
+        ok, msg = await g.can_attack("US")
+        assert ok is False
+        await db.close()
+    run(_t())
+
+
+def test_attack_with_forces_and_cooldown(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "atk1")
+        await g.claim(1, "US")
+        await g.claim(2, "DE")
+        await db.execute("UPDATE ng_countries SET treasury=50000000 WHERE country_code='US'")
+        await db.execute("UPDATE ng_countries SET treasury=20000000 WHERE country_code='DE'")
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('US','g_inf',20)"
+        )
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('DE','g_inf',5)"
+        )
+        report = await g.attack("US", "DE", "ground", 50, 1)
+        assert "گزارش" in report
+        with pytest.raises(GameError):
+            await g.attack("US", "DE", "ground", 50, 1)  # cooldown
+        # force expire cooldown
+        await db.execute(
+            "UPDATE ng_war_state SET last_attack_at=$1 WHERE country_code='US'",
+            ("2000-01-01T00:00:00+00:00",),
+        )
+        report2 = await g.attack("US", "DE", "ground", 30, 1)
+        assert "گزارش" in report2
+        await db.close()
+    run(_t())
+
+
+def test_test_mode_snapshot_restore(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "testm", owner=1)
+        await g.claim(1, "US")
+        await db.execute("UPDATE ng_countries SET treasury=12345 WHERE country_code='US'")
+        await g.enable_test_mode(1)
+        c = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'")
+        assert float(c["treasury"]) >= 999_999_999
+        await g.disable_test_mode(1)
+        c2 = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'")
+        assert abs(float(c2["treasury"]) - 12345) < 1
+        await db.close()
+    run(_t())
+
+
+def test_membership_settings(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "mem", owner=7)
+        assert await g.membership_enabled() is True
+        await g.set_membership_enabled(7, False)
+        assert await g.membership_enabled() is False
+        chats = await g.list_forced_chats()
+        assert any(c["chat_id"] == "@warworld3" for c in chats)
+        await db.close()
+    run(_t())

@@ -43,6 +43,7 @@ class Game:
         await self._seed_catalog()
         await self._seed_countries()
         await self._seed_bot_settings()
+        await self._seed_membership()
 
     def _default_logs(self) -> dict:
         keys = [
@@ -564,20 +565,75 @@ class Game:
         return False
 
     # ---------- war ----------
+    ATTACK_COOLDOWN_SEC = 300
+    MAX_LOOT_RATIO = 0.08  # max 8% of defender treasury
+    MAX_LOOT_ABS = 2_000_000
+
     async def power(self, code: str, kind: str) -> float:
         inv = await self.db.fetch(
-            "SELECT * FROM ng_inventory WHERE country_code=$1", (code,)
+            "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (code,)
         )
         total = 0.0
-        cat_map = {"ground": "ground", "air": "air", "sea": "sea"}
+        cat_map = {"ground": "ground", "air": "air", "sea": "sea", "defense": "defense"}
         want = cat_map.get(kind, kind)
         for r in inv:
             meta = self._cat.get(r["item_code"])
             if not meta:
                 continue
             if meta["category"] == want or (kind == "ground" and meta["category"] == "defense"):
-                total += float(meta["power_score"]) * float(r["quantity"])
+                total += float(meta.get("power_score") or 0) * float(r["quantity"])
         return total
+
+    async def available_force(self, code: str, kind: str) -> tuple[float, list]:
+        """Return (total_power, units[{item, qty, power}]) for free (non-zero) inventory."""
+        inv = await self.db.fetch(
+            "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (code,)
+        )
+        units = []
+        total = 0.0
+        for r in inv:
+            meta = self._cat.get(r["item_code"])
+            if not meta:
+                continue
+            cat = meta["category"]
+            if kind == "ground" and cat not in ("ground", "defense"):
+                continue
+            if kind in ("air", "sea", "defense") and cat != kind:
+                continue
+            if kind not in ("ground", "air", "sea", "defense"):
+                continue
+            ps = float(meta.get("power_score") or 0)
+            if ps <= 0 and cat != "defense":
+                continue
+            q = float(r["quantity"])
+            total += ps * q
+            units.append({"item_code": r["item_code"], "quantity": q, "power": ps})
+        return total, units
+
+    async def can_attack(self, code: str, kind: str | None = None) -> tuple[bool, str]:
+        if await self.is_test_mode_player_country(code):
+            # test country of owner — still need some force unless test grants units
+            pass
+        kinds = [kind] if kind else ["ground", "air", "sea"]
+        any_power = 0.0
+        for k in kinds:
+            p, _ = await self.available_force(code, k)
+            any_power += p
+        if any_power <= 0:
+            return False, "نیروی نظامی قابل‌استفاده ندارید. ابتدا از فروشگاه تجهیز تهیه کنید."
+        ws = await self.db.fetchrow("SELECT * FROM ng_war_state WHERE country_code=$1", (code,))
+        if ws and ws.get("last_attack_at") and not await self.is_test_active_for_country(code):
+            try:
+                last = datetime.fromisoformat(str(ws["last_attack_at"]).replace("Z", "+00:00"))
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+                if elapsed < self.ATTACK_COOLDOWN_SEC:
+                    left = int(self.ATTACK_COOLDOWN_SEC - elapsed)
+                    return False, f"هنوز در محدودیت حمله هستید. {left} ثانیه صبر کنید."
+            except Exception:
+                pass
+        return True, ""
 
     async def attack(self, attacker: str, defender: str, kind: str, percent: float, pid: int) -> str:
         meta = await self.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
@@ -587,52 +643,161 @@ class Game:
             raise GameError("پیمان صلح فعال است؛ حمله ممکن نیست.")
         if attacker == defender:
             raise GameError("نامعتبر")
-        percent = max(10, min(100, float(percent))) / 100.0
-        ap = await self.power(attacker, kind) * percent
-        dp = await self.power(defender, kind) + await self.power(defender, "defense") * 0.5
-        # consume nothing physically for abstract percent engagement except economic toll
-        damage = max(20, (ap - dp * 0.6) * 0.4 + 30)
-        loot = 0.0
-        result = "تساوی نسبی"
+        if kind not in ("ground", "air", "sea"):
+            raise GameError("نوع درگیری نامعتبر است.")
+        percent = max(10, min(100, float(percent)))
+        test_atk = await self.is_test_active_for_country(attacker)
+
         async with self.db.transaction() as tx:
+            a = await tx.fetchrow(
+                "SELECT * FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
+                (attacker, pid),
+            )
             d = await tx.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (defender,))
-            a = await tx.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (attacker,))
-            if not d or not a or int(d.get("is_destroyed") or 0):
-                raise GameError("هدف معتبر نیست")
-            new_hp = max(0, float(d["hp"]) - damage)
+            if not a or not d or int(d.get("is_destroyed") or 0):
+                raise GameError("هدف یا مالکیت معتبر نیست.")
+            if d.get("owner_player_id") is None:
+                raise GameError("کشور هدف بدون بازیکن است.")
+
+            # cooldown inside transaction
+            ws = await tx.fetchrow("SELECT * FROM ng_war_state WHERE country_code=$1", (attacker,))
+            now = datetime.now(timezone.utc)
+            if ws and ws.get("last_attack_at") and not test_atk:
+                try:
+                    last = datetime.fromisoformat(str(ws["last_attack_at"]).replace("Z", "+00:00"))
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    elapsed = (now - last).total_seconds()
+                    if elapsed < self.ATTACK_COOLDOWN_SEC:
+                        left = int(self.ATTACK_COOLDOWN_SEC - elapsed)
+                        raise GameError(f"محدودیت حمله: {left} ثانیه باقی مانده است.")
+                except GameError:
+                    raise
+                except Exception:
+                    pass
+
+            # forces from inventory (locked by transaction)
+            inv = await tx.fetch(
+                "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (attacker,)
+            )
+            units = []
+            total_power = 0.0
+            for r in inv:
+                meta_i = self._cat.get(r["item_code"])
+                if not meta_i:
+                    continue
+                cat = meta_i["category"]
+                if kind == "ground" and cat not in ("ground", "defense"):
+                    continue
+                if kind in ("air", "sea") and cat != kind:
+                    continue
+                ps = float(meta_i.get("power_score") or 0)
+                if ps <= 0:
+                    continue
+                q = float(r["quantity"])
+                total_power += ps * q
+                units.append((r["item_code"], q, ps))
+
+            if total_power <= 0:
+                raise GameError("نیروی نظامی قابل‌استفاده برای این نوع حمله ندارید.")
+
+            # deploy percent of units (casualties / commitment)
+            ratio = percent / 100.0
+            engaged_power = total_power * ratio
+            for item_code, q, ps in units:
+                use = q * ratio
+                if use <= 0:
+                    continue
+                # consume 10% of engaged as losses (min 0)
+                loss = max(0.0, use * 0.1)
+                new_q = max(0.0, q - loss)
+                await tx.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                    (new_q, attacker, item_code),
+                )
+
+            dp_units = await tx.fetch(
+                "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (defender,)
+            )
+            dp = 0.0
+            for r in dp_units:
+                meta_i = self._cat.get(r["item_code"])
+                if not meta_i:
+                    continue
+                if meta_i["category"] in (kind, "defense") or (kind == "ground" and meta_i["category"] == "defense"):
+                    dp += float(meta_i.get("power_score") or 0) * float(r["quantity"])
+
+            ap = engaged_power
+            # damage scales with power difference
+            if ap <= 0:
+                raise GameError("نیروی اعزامی صفر است.")
+            raw = (ap - dp * 0.55) * 0.35 + 15
+            damage = max(5.0, min(200.0, raw))
+            victory = ap >= dp * 0.85
+            result = f"پیروزی {attacker}" if victory else f"برتری دفاعی {defender}"
+
+            new_hp = max(0.0, float(d["hp"]) - damage)
             await tx.execute(
                 "UPDATE ng_countries SET hp=$1 WHERE country_code=$2", (new_hp, defender)
             )
-            # small cost to attacker
-            toll = min(float(a["treasury"]) * 0.005, 200_000)
-            await tx.execute(
-                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-                (float(a["treasury"]) - toll, attacker),
-            )
-            if ap >= dp:
-                result = f"پیروزی {attacker}"
-                loot = min(float(d["treasury"]) * 0.01, 500_000)
-                if loot > 0 and float(d["treasury"]) >= loot:
+
+            # economic toll on attacker
+            toll = min(float(a["treasury"]) * 0.003, 150_000)
+            if not test_atk:
+                await tx.execute(
+                    "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                    (max(0.0, float(a["treasury"]) - toll), attacker),
+                )
+                a_treas = max(0.0, float(a["treasury"]) - toll)
+            else:
+                a_treas = float(a["treasury"])
+
+            loot = 0.0
+            if victory:
+                # loot based on damage relative to max_hp and defender treasury
+                hp_ratio = damage / max(float(d["max_hp"]), 1.0)
+                econ_ratio = min(1.0, damage / 100.0)
+                loot = float(d["treasury"]) * min(self.MAX_LOOT_RATIO, 0.02 + hp_ratio * 0.1 + econ_ratio * 0.03)
+                loot = min(loot, self.MAX_LOOT_ABS, float(d["treasury"]) * 0.5)
+                loot = max(0.0, loot)
+                if loot > 0:
                     await tx.execute(
                         "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
                         (float(d["treasury"]) - loot, defender),
                     )
                     await tx.execute(
                         "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-                        (float(a["treasury"]) - toll + loot, attacker),
+                        (a_treas + loot, attacker),
                     )
-                else:
-                    loot = 0
+                    a_treas = a_treas + loot
+                    await self._tx_log_activity(
+                        tx, "economy", f"غنیمت جنگی {int(loot):,} از {defender}", attacker, pid
+                    )
+
+            # set cooldown
+            seq = int((ws or {}).get("attack_seq") or 0) + 1
+            if ws:
+                await tx.execute(
+                    "UPDATE ng_war_state SET last_attack_at=$1, attack_seq=$2 WHERE country_code=$3",
+                    (now.isoformat(), seq, attacker),
+                )
             else:
-                result = f"برتری دفاعی {defender}"
-            destroyed = False
-            if new_hp <= 0:
-                destroyed = True
-                # transfer 50% assets
-                inv = await tx.fetch(
+                await tx.execute(
+                    "INSERT INTO ng_war_state (country_code, last_attack_at, attack_seq) VALUES ($1,$2,$3)",
+                    (attacker, now.isoformat(), seq),
+                )
+
+            destroyed = new_hp <= 0
+            if destroyed:
+                inv_d = await tx.fetch(
                     "SELECT * FROM ng_inventory WHERE country_code=$1", (defender,)
                 )
-                for r in inv:
+                d_row = await tx.fetchrow(
+                    "SELECT treasury, owner_player_id FROM ng_countries WHERE country_code=$1",
+                    (defender,),
+                )
+                half_money = float(d_row["treasury"]) * 0.5
+                for r in inv_d:
                     half = float(r["quantity"]) * 0.5
                     if half <= 0:
                         continue
@@ -654,36 +819,51 @@ class Game:
                             "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,$2,$3)",
                             (attacker, r["item_code"], half),
                         )
-                half_money = float(d["treasury"]) * 0.5
                 await tx.execute(
                     "UPDATE ng_countries SET treasury=$1, owner_player_id=NULL, is_destroyed=1 WHERE country_code=$2",
-                    (float(d["treasury"]) - half_money, defender),
+                    (float(d_row["treasury"]) - half_money, defender),
                 )
                 await tx.execute(
                     "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-                    (float(a["treasury"]) - toll + loot + half_money, attacker),
+                    (a_treas + half_money, attacker),
                 )
-                # cooldown for previous owner
-                prev = d.get("owner_player_id")
+                prev = d_row.get("owner_player_id")
                 if prev:
-                    until = (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()
+                    until = (now + timedelta(hours=48)).isoformat()
                     await tx.execute(
                         "UPDATE ng_players SET country_code=NULL, destroy_cooldown_until=$1 WHERE player_id=$2",
                         (until, int(prev)),
                     )
+
         report = (
             f"⚔️ گزارش درگیری\n\n"
-            f"مهاجم: {attacker}\nمدافع: {defender}\nنوع: {kind}\n"
+            f"مهاجم: {attacker}\nمدافع: {defender}\nنوع: {kind}\nشدت: {int(percent)}٪\n"
             f"نتیجه: {result}\n"
             f"خسارت سلامت: {int(damage)}\n"
             f"سلامت فعلی مدافع: {int(max(0, new_hp))}\n"
-            f"غنیمت: {int(loot):,}" + (" (غنیمت به دست نیامد)" if loot <= 0 and ap >= dp else "")
+            f"غنیمت نقدی: {int(loot):,}"
+            + (" (غنیمتی نبود)" if loot <= 0 and victory else "")
         )
         await self.log_activity("attack", report.replace("\n", " | "), attacker, pid)
         await self.broadcast_log("attack", report)
         if new_hp <= 0:
             await self.broadcast_log("destroy", f"💥 کشور {defender} نابود شد.")
         return report
+
+    async def _tx_log_activity(self, tx, kind, summary, country=None, player_id=None):
+        nid = await tx.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_activity")
+        await tx.execute(
+            "INSERT INTO ng_activity (id, kind, country_code, player_id, summary, created_at, meta_json) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            (
+                int(nid["id"]),
+                kind,
+                country,
+                player_id,
+                summary[:500],
+                datetime.now(timezone.utc).isoformat(),
+                "{}",
+            ),
+        )
 
     # ---------- statements ----------
     async def submit_statement(self, code: str, pid: int, body: str) -> str:
@@ -793,7 +973,7 @@ class Game:
         tables = [
             "ng_cart","ng_market","ng_peace","ng_statements","ng_daily_payouts",
             "ng_activity","ng_admin_log","ng_buildings","ng_inventory","ng_players",
-            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox",
+            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode",
         ]
         async with self.db.transaction() as tx:
             for t in tables:
@@ -1529,5 +1709,215 @@ class Game:
     async def pending_statements_list(self) -> list[dict]:
         return await self.db.fetch(
             "SELECT * FROM ng_statements WHERE status='pending' ORDER BY id DESC"
+        )
+
+
+    async def _seed_membership(self) -> None:
+        row = await self.db.fetchrow("SELECT id FROM ng_membership_cfg WHERE id=1")
+        if not row:
+            await self.db.execute(
+                "INSERT INTO ng_membership_cfg (id, force_enabled) VALUES (1,1)"
+            )
+        exists = await self.db.fetchrow(
+            "SELECT id FROM ng_forced_chats WHERE chat_id=$1", ("@warworld3",)
+        )
+        if not exists:
+            nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_forced_chats")
+            await self.db.execute(
+                """
+                INSERT INTO ng_forced_chats (id, chat_id, title, invite_link, kind, active)
+                VALUES ($1,$2,$3,$4,'group',1)
+                """,
+                (int(nid["id"]), "@warworld3", "WORLD WAR", "https://ble.ir/warworld3"),
+            )
+
+    # ---------- test mode ----------
+    async def is_test_mode(self, pid: int) -> bool:
+        row = await self.db.fetchrow(
+            "SELECT active FROM ng_test_mode WHERE player_id=$1", (pid,)
+        )
+        return bool(row and int(row.get("active") or 0) == 1)
+
+    async def is_test_active_for_country(self, code: str) -> bool:
+        c = await self.db.fetchrow(
+            "SELECT owner_player_id FROM ng_countries WHERE country_code=$1", (code,)
+        )
+        if not c or not c.get("owner_player_id"):
+            return False
+        return await self.is_test_mode(int(c["owner_player_id"]))
+
+    async def is_test_mode_player_country(self, code: str) -> bool:
+        return await self.is_test_active_for_country(code)
+
+    async def enable_test_mode(self, actor: int) -> str:
+        if not self.is_owner(actor):
+            raise GameError("فقط مالک")
+        code = await self.player_country(actor)
+        if not code:
+            raise GameError("ابتدا یک کشور انتخاب کنید تا Snapshot گرفته شود.")
+        existing = await self.db.fetchrow(
+            "SELECT active FROM ng_test_mode WHERE player_id=$1", (actor,)
+        )
+        if existing and int(existing.get("active") or 0) == 1:
+            raise GameError("حالت تست از قبل فعال است.")
+        # snapshot real state
+        c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
+        inv = await self.db.fetch(
+            "SELECT item_code, quantity FROM ng_inventory WHERE country_code=$1", (code,)
+        )
+        ws = await self.db.fetchrow("SELECT * FROM ng_workshop WHERE country_code=$1", (code,))
+        war = await self.db.fetchrow("SELECT * FROM ng_war_state WHERE country_code=$1", (code,))
+        snap = {
+            "country_code": code,
+            "country": {
+                "treasury": float(c["treasury"]),
+                "hp": float(c["hp"]),
+                "daily_income": float(c["daily_income"]),
+                "daily_expense": float(c["daily_expense"]),
+            },
+            "inventory": [{"item_code": r["item_code"], "quantity": float(r["quantity"])} for r in inv],
+            "workshop": dict(ws) if ws else None,
+            "war_state": dict(war) if war else None,
+        }
+        now = datetime.now(timezone.utc).isoformat()
+        if existing:
+            await self.db.execute(
+                "UPDATE ng_test_mode SET active=1, snapshot_json=$1, activated_at=$2 WHERE player_id=$3",
+                (json.dumps(snap, ensure_ascii=False), now, actor),
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO ng_test_mode (player_id, active, snapshot_json, activated_at) VALUES ($1,1,$2,$3)",
+                (actor, json.dumps(snap, ensure_ascii=False), now),
+            )
+        # grant test resources (does not touch other players)
+        await self.db.execute(
+            "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+            (999_999_999.0, code),
+        )
+        for item, qty in (
+            ("g_inf", 500),
+            ("g_armor", 100),
+            ("a_fight", 50),
+            ("s_patrol", 50),
+            ("d_sam", 50),
+            ("sp_scientist", 20),
+            ("b_refinery", 5),
+        ):
+            inv_r = await self.db.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                (code, item),
+            )
+            if inv_r:
+                await self.db.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                    (float(inv_r["quantity"]) + qty, code, item),
+                )
+            else:
+                await self.db.execute(
+                    "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,$2,$3)",
+                    (code, item, qty),
+                )
+        await self.db.execute(
+            "DELETE FROM ng_war_state WHERE country_code=$1", (code,)
+        )
+        await self.admin_log(actor, "test_on", code)
+        return "✅ حالت تست فعال شد. منابع آزمایشی فقط روی کشور شما اعمال شد. با خاموش کردن، وضعیت واقعی برمی‌گردد."
+
+    async def disable_test_mode(self, actor: int) -> str:
+        if not self.is_owner(actor):
+            raise GameError("فقط مالک")
+        row = await self.db.fetchrow(
+            "SELECT * FROM ng_test_mode WHERE player_id=$1 AND active=1", (actor,)
+        )
+        if not row:
+            raise GameError("حالت تست فعال نیست.")
+        snap = json.loads(row["snapshot_json"] or "{}")
+        code = snap.get("country_code") or await self.player_country(actor)
+        if not code:
+            await self.db.execute(
+                "UPDATE ng_test_mode SET active=0 WHERE player_id=$1", (actor,)
+            )
+            return "حالت تست خاموش شد (کشور یافت نشد)."
+        async with self.db.transaction() as tx:
+            country = snap.get("country") or {}
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1, hp=$2, daily_income=$3, daily_expense=$4 WHERE country_code=$5",
+                (
+                    float(country.get("treasury") or 0),
+                    float(country.get("hp") or 1000),
+                    float(country.get("daily_income") or 0),
+                    float(country.get("daily_expense") or 0),
+                    code,
+                ),
+            )
+            await tx.execute("DELETE FROM ng_inventory WHERE country_code=$1", (code,))
+            for r in snap.get("inventory") or []:
+                await tx.execute(
+                    "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,$2,$3)",
+                    (code, r["item_code"], float(r["quantity"])),
+                )
+            await tx.execute(
+                "UPDATE ng_test_mode SET active=0 WHERE player_id=$1", (actor,)
+            )
+        await self.recalc_income(code)
+        await self.admin_log(actor, "test_off", code)
+        return "✅ حالت تست خاموش شد. موجودی واقعی از Snapshot بازیابی شد."
+
+    # ---------- forced membership ----------
+    async def membership_enabled(self) -> bool:
+        row = await self.db.fetchrow("SELECT force_enabled FROM ng_membership_cfg WHERE id=1")
+        return bool(row and int(row.get("force_enabled") or 0) == 1)
+
+    async def set_membership_enabled(self, actor: int, enabled: bool) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        await self.db.execute(
+            "UPDATE ng_membership_cfg SET force_enabled=$1 WHERE id=1",
+            (1 if enabled else 0,),
+        )
+        return "عضویت اجباری فعال شد." if enabled else "عضویت اجباری خاموش شد."
+
+    async def list_forced_chats(self) -> list[dict]:
+        return await self.db.fetch(
+            "SELECT * FROM ng_forced_chats ORDER BY id"
+        )
+
+    async def add_forced_chat(self, actor: int, chat_id: str, title: str, link: str = "", kind: str = "group") -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        chat_id = (chat_id or "").strip()
+        if not chat_id:
+            raise GameError("شناسه نامعتبر")
+        kind = kind if kind in ("group", "channel") else "group"
+        nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_forced_chats")
+        await self.db.execute(
+            """
+            INSERT INTO ng_forced_chats (id, chat_id, title, invite_link, kind, active)
+            VALUES ($1,$2,$3,$4,$5,1)
+            """,
+            (int(nid["id"]), chat_id, title or chat_id, link or "", kind),
+        )
+        await self.admin_log(actor, "force_add", chat_id)
+        return "✅ اضافه شد."
+
+    async def remove_forced_chat(self, actor: int, chat_pk: int) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        await self.db.execute("DELETE FROM ng_forced_chats WHERE id=$1", (chat_pk,))
+        return "حذف شد."
+
+    async def toggle_forced_chat(self, actor: int, chat_pk: int, active: bool) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        await self.db.execute(
+            "UPDATE ng_forced_chats SET active=$1 WHERE id=$2",
+            (1 if active else 0, chat_pk),
+        )
+        return "به‌روز شد."
+
+    async def active_forced_chats(self) -> list[dict]:
+        return await self.db.fetch(
+            "SELECT * FROM ng_forced_chats WHERE active=1"
         )
 
