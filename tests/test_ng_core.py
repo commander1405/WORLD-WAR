@@ -181,7 +181,8 @@ def test_workshop_upgrade_and_jobs(tmp_path):
         await g.admin_give_item(1, "US", "sp_scientist", 1)
         msg = await g.workshop_upgrade("US", 10)
         assert "ارتق" in msg
-        msg2 = await g.start_uranium_job("US", 1)
+        await db.execute("UPDATE ng_countries SET treasury=500000000 WHERE country_code='US'")
+        msg2 = await g.start_uranium_job("US", 10)
         assert "شروع" in msg2
         # force complete
         await db.execute(
