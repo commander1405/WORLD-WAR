@@ -29,6 +29,7 @@ class SQLiteDatabase(Database):
     def __init__(self, path: Path) -> None:
         self._path = path
         self._db: Optional[aiosqlite.Connection] = None
+        self._tx_depth = 0
 
     async def connect(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +54,8 @@ class SQLiteDatabase(Database):
         db = self._db_or_raise()
         q, a = _pg_to_qmark(sql, args)
         cur = await db.execute(q, a)
-        await db.commit()
+        if self._tx_depth == 0:
+            await db.commit()
         return f"rows={cur.rowcount}"
 
     async def fetch(self, sql: str, args: Sequence[Any] = ()) -> list[dict[str, Any]]:
@@ -79,12 +81,18 @@ class SQLiteDatabase(Database):
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Database]:
         db = self._db_or_raise()
-        await db.execute("BEGIN")
+        if self._tx_depth == 0:
+            await db.execute("BEGIN")
+        self._tx_depth += 1
         try:
             yield self
-            await db.commit()
+            self._tx_depth -= 1
+            if self._tx_depth == 0:
+                await db.commit()
         except Exception:
-            await db.rollback()
+            self._tx_depth = max(0, self._tx_depth - 1)
+            if self._tx_depth == 0:
+                await db.rollback()
             raise
 
     async def health_check(self) -> bool:
