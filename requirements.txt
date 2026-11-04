@@ -1,0 +1,4 @@
+python-bale-bot>=2.5.0
+asyncpg>=0.29.0
+aiosqlite>=0.20.0
+python-dotenv>=1.0.0
