@@ -252,6 +252,12 @@ class Game:
                 raise GameError("مالکیت کشور معتبر نیست.")
             if float(c["treasury"]) < total:
                 raise GameError("موجودی خزانه برای این خرید کافی نیست.")
+            # nuclear gate
+            meta_w = await tx.fetchrow("SELECT nuclear_enabled FROM world_meta WHERE id=1")
+            nuke_on = int((meta_w or {}).get("nuclear_enabled") or 0) == 1
+            for it in items:
+                if it.get("category") == "nuclear" and not nuke_on:
+                    raise GameError("قابلیت هسته‌ای بازی توسط سازمان ملل بسته است.")
             await tx.execute(
                 "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
                 (float(c["treasury"]) - total, country_code),
@@ -853,4 +859,215 @@ class Game:
         for r in rows:
             meta = self._cat.get(r["item_code"], {"name_fa": r["item_code"]})
             lines.append(f"• {meta['name_fa']}: {int(float(r['quantity']))}")
+        return "\n".join(lines)
+
+
+    async def cart_set(self, pid: int, item: str, qty: float) -> str:
+        meta = self._cat.get(item)
+        if not meta:
+            raise GameError("کالا یافت نشد")
+        qty = float(qty)
+        if qty <= 0:
+            await self.db.execute(
+                "DELETE FROM ng_cart WHERE player_id=$1 AND item_code=$2", (pid, item)
+            )
+            return f"🗑 {meta['name_fa']} از سبد حذف شد."
+        qty = min(float(meta["max_per_order"]), qty)
+        row = await self.db.fetchrow(
+            "SELECT quantity FROM ng_cart WHERE player_id=$1 AND item_code=$2", (pid, item)
+        )
+        if row:
+            await self.db.execute(
+                "UPDATE ng_cart SET quantity=$1 WHERE player_id=$2 AND item_code=$3",
+                (qty, pid, item),
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO ng_cart (player_id, item_code, quantity) VALUES ($1,$2,$3)",
+                (pid, item, qty),
+            )
+        return f"✅ تعداد {meta['name_fa']} = {int(qty)}"
+
+    async def market_cancel(self, listing_id: int, country: str) -> str:
+        async with self.db.transaction() as tx:
+            L = await tx.fetchrow(
+                "SELECT * FROM ng_market WHERE id=$1 AND active=1 AND seller_country=$2",
+                (listing_id, country),
+            )
+            if not L:
+                raise GameError("آگهی یافت نشد")
+            qty = float(L["quantity"])
+            await tx.execute("UPDATE ng_market SET active=0 WHERE id=$1", (listing_id,))
+            inv = await tx.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                (country, L["item_code"]),
+            )
+            if inv:
+                await tx.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                    (float(inv["quantity"]) + qty, country, L["item_code"]),
+                )
+            else:
+                await tx.execute(
+                    "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,$2,$3)",
+                    (country, L["item_code"], qty),
+                )
+        return "✅ آگهی لغو و کالا به انبار برگشت."
+
+    async def find_player(self, query: str) -> Optional[dict]:
+        q = (query or "").strip().lstrip("@")
+        if not q:
+            return None
+        if q.isdigit():
+            return await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (int(q),))
+        return await self.db.fetchrow(
+            "SELECT * FROM ng_players WHERE lower(username)=lower($1)", (q,)
+        )
+
+    async def list_players(self, limit: int = 30) -> list[dict]:
+        return await self.db.fetch(
+            "SELECT * FROM ng_players ORDER BY last_seen_at DESC"
+        )[:limit]
+
+    async def ban_user(self, actor: int, query: str, reason: str = "") -> str:
+        p = await self.find_player(query)
+        if not p:
+            raise GameError("بازیکن یافت نشد")
+        return await self.ban(actor, int(p["player_id"]), reason)
+
+    async def unban_user(self, actor: int, query: str) -> str:
+        p = await self.find_player(query)
+        if not p:
+            raise GameError("بازیکن یافت نشد")
+        return await self.unban(actor, int(p["player_id"]))
+
+    async def admin_give_item(self, actor: int, code: str, item: str, qty: float) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        if item not in self._cat:
+            raise GameError("کالا نامعتبر")
+        qty = float(qty)
+        inv = await self.db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+            (code, item),
+        )
+        if inv:
+            await self.db.execute(
+                "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                (float(inv["quantity"]) + qty, code, item),
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,$2,$3)",
+                (code, item, qty),
+            )
+        await self.recalc_income(code)
+        await self.admin_log(actor, "give_item", f"{code} {item} {qty}")
+        return "✅ تجهیزات اضافه شد."
+
+    async def admin_take_item(self, actor: int, code: str, item: str, qty: float) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        qty = float(qty)
+        inv = await self.db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+            (code, item),
+        )
+        have = float(inv["quantity"]) if inv else 0
+        if have < qty:
+            raise GameError("موجودی کافی نیست")
+        await self.db.execute(
+            "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+            (have - qty, code, item),
+        )
+        await self.recalc_income(code)
+        await self.admin_log(actor, "take_item", f"{code} {item} {qty}")
+        return "✅ تجهیزات برداشت شد."
+
+    async def set_log_flag(self, actor: int, kind: str, enabled: bool) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        meta = await self.db.fetchrow("SELECT log_flags_json FROM world_meta WHERE id=1")
+        flags = self._default_logs()
+        if meta and meta.get("log_flags_json"):
+            try:
+                flags.update(json.loads(meta["log_flags_json"]))
+            except Exception:
+                pass
+        if kind not in flags:
+            raise GameError("نوع لاگ نامعتبر")
+        flags[kind] = bool(enabled)
+        await self.db.execute(
+            "UPDATE world_meta SET log_flags_json=$1 WHERE id=1",
+            (json.dumps(flags, ensure_ascii=False),),
+        )
+        return f"لاگ «{kind}» {'روشن' if enabled else 'خاموش'} شد."
+
+    async def get_log_flags(self) -> dict:
+        meta = await self.db.fetchrow("SELECT log_flags_json FROM world_meta WHERE id=1")
+        flags = self._default_logs()
+        if meta and meta.get("log_flags_json"):
+            try:
+                flags.update(json.loads(meta["log_flags_json"]))
+            except Exception:
+                pass
+        return flags
+
+    async def pending_peace_for(self, country: str) -> list[dict]:
+        return await self.db.fetch(
+            """
+            SELECT * FROM ng_peace
+            WHERE status='pending' AND (country_a=$1 OR country_b=$1)
+            ORDER BY id DESC
+            """,
+            (country,),
+        )
+
+    async def active_peace_for(self, country: str) -> list[dict]:
+        rows = await self.db.fetch(
+            "SELECT * FROM ng_peace WHERE status='active' AND (country_a=$1 OR country_b=$1)",
+            (country,),
+        )
+        # expire if needed
+        out = []
+        for p in rows:
+            if await self.at_peace(p["country_a"], p["country_b"]):
+                out.append(p)
+        return out
+
+    async def peace_reject(self, peace_id: int, country: str) -> str:
+        p = await self.db.fetchrow("SELECT * FROM ng_peace WHERE id=$1 AND status='pending'", (peace_id,))
+        if not p:
+            raise GameError("درخواست یافت نشد")
+        if country not in (p["country_a"], p["country_b"]):
+            raise GameError("دسترسی ندارید")
+        await self.db.execute(
+            "UPDATE ng_peace SET status='rejected' WHERE id=$1", (peace_id,)
+        )
+        return "درخواست صلح رد شد."
+
+    async def pop_group_logs(self, limit: int = 20) -> list[dict]:
+        rows = await self.db.fetch(
+            "SELECT * FROM ng_activity WHERE kind LIKE 'group_%' ORDER BY id ASC"
+        )
+        rows = rows[:limit]
+        for r in rows:
+            await self.db.execute("DELETE FROM ng_activity WHERE id=$1", (r["id"],))
+        return rows
+
+    async def world_status_text(self) -> str:
+        meta = await self.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
+        countries = await self.list_countries()
+        free = sum(1 for c in countries if not c.get("owner_player_id"))
+        owned = sum(1 for c in countries if c.get("owner_player_id"))
+        war = "باز" if meta and int(meta.get("war_enabled") or 0) else "بسته"
+        nuke = "فعال" if meta and int(meta.get("nuclear_enabled") or 0) else "غیرفعال"
+        lines = [
+            "🌍 وضعیت جهان",
+            f"شروع جهان: {(meta or {}).get('started_at') or '—'}",
+            f"جنگ: {war}",
+            f"هسته‌ای بازی: {nuke}",
+            f"کشور آزاد: {free} | دارای بازیکن: {owned}",
+            f"ریست‌ها: {int((meta or {}).get('reset_count') or 0)}",
+        ]
         return "\n".join(lines)

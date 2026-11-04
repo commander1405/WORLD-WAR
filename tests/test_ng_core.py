@@ -107,3 +107,54 @@ def test_reset_owner_only(tmp_path):
         assert c["owner_player_id"] is None
         await db.close()
     run(_t())
+
+
+def test_cart_remove_and_market_cancel(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path)
+        await g.claim(1, "US")
+        await g.cart_add(1, "g_inf", 3)
+        await g.cart_set(1, "g_inf", 0)
+        _, total, items = await g.cart_view(1, "US")
+        assert total == 0 and not items
+        await g.cart_add(1, "g_inf", 4)
+        await g.checkout(1, "US")
+        await g.market_create("US", "g_inf", 2, 5000, 1)
+        listings = await g.market_list()
+        assert listings
+        await g.market_cancel(listings[0]["id"], "US")
+        await db.close()
+    run(_t())
+
+
+def test_aid_army_and_log_flags(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path, owner=5)
+        await g.claim(1, "US")
+        await g.claim(2, "DE")
+        await g.cart_add(1, "g_inf", 5)
+        await g.checkout(1, "US")
+        await g.aid_army("US", "DE", "g_inf", 2, 1)
+        inv = await db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code='DE' AND item_code='g_inf'"
+        )
+        assert float(inv["quantity"]) >= 2
+        msg = await g.set_log_flag(5, "buy", False)
+        assert "خاموش" in msg
+        flags = await g.get_log_flags()
+        assert flags["buy"] is False
+        await db.close()
+    run(_t())
+
+
+def test_ban_by_username(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path, owner=9)
+        await g.touch_player(3, username="testuser", display="T")
+        await g.ban_user(9, "@testuser", "spam")
+        with pytest.raises(GameError):
+            await g.assert_not_banned(3)
+        await g.unban_user(9, "testuser")
+        await g.assert_not_banned(3)
+        await db.close()
+    run(_t())
