@@ -1461,7 +1461,8 @@ class Game:
             if not c or float(c["treasury"]) < cost:
                 raise GameError("موجودی خزانه برای شروع تولید کافی نیست.")
             now = datetime.now(timezone.utc)
-            fin = now + timedelta(minutes=minutes)
+            instant = await self.is_test_mode(pid)
+            fin = now if instant else now + timedelta(minutes=minutes)
             await tx.execute(
                 "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
                 (float(c["treasury"]) - cost, code),
@@ -1474,7 +1475,10 @@ class Game:
                 """,
                 (int(nid["id"]), code, now.isoformat(), fin.isoformat(), cost, amount),
             )
+        await self.complete_due_jobs(code)
         await self.log_activity("workshop", f"شروع تولید اورانیوم ×{amount:.0f}", code, pid)
+        if instant:
+            return f"✅ (تست) تولید اورانیوم فوری انجام شد — {amount:.0f} واحد"
         return (
             f"✅ تولید اورانیوم شروع شد\n"
             f"هزینه: {int(cost):,}\nمقدار: {amount:.0f} واحد\nمدت تقریبی: {minutes:.0f} دقیقه"
@@ -1519,7 +1523,8 @@ class Game:
             if float(c["treasury"]) < cost:
                 raise GameError("موجودی خزانه کافی نیست.")
             now = datetime.now(timezone.utc)
-            fin = now + timedelta(minutes=minutes)
+            instant = await self.is_test_mode(pid)
+            fin = now if instant else now + timedelta(minutes=minutes)
             await tx.execute(
                 "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
                 (float(c["treasury"]) - cost, code),
@@ -1532,7 +1537,10 @@ class Game:
                 """,
                 (int(nid["id"]), code, now.isoformat(), fin.isoformat(), cost, points),
             )
+        await self.complete_due_jobs(code)
         await self.log_activity("workshop", f"شروع تحقیق فناوری سطح+{points:.0f}", code, pid)
+        if instant:
+            return f"✅ (تست) تحقیق فوری: +{points:.0f} سطح فناوری"
         return (
             f"✅ تحقیق فناوری صلح‌آمیز شروع شد\n"
             f"هزینه: {int(cost):,}\nپیشرفت: +{points:.0f} سطح\nمدت: {minutes:.0f} دقیقه"
@@ -1920,4 +1928,263 @@ class Game:
         return await self.db.fetch(
             "SELECT * FROM ng_forced_chats WHERE active=1"
         )
+
+
+    # ---------- membership verify ----------
+    async def membership_cache_ok(self, pid: int, chat_id: str, max_age_hours: float = 12) -> bool:
+        row = await self.db.fetchrow(
+            "SELECT verified_at FROM ng_member_cache WHERE player_id=$1 AND chat_id=$2",
+            (pid, chat_id),
+        )
+        if not row:
+            return False
+        try:
+            ts = datetime.fromisoformat(str(row["verified_at"]).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - ts).total_seconds() < max_age_hours * 3600
+        except Exception:
+            return False
+
+    async def membership_cache_set(self, pid: int, chat_id: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        row = await self.db.fetchrow(
+            "SELECT player_id FROM ng_member_cache WHERE player_id=$1 AND chat_id=$2",
+            (pid, chat_id),
+        )
+        if row:
+            await self.db.execute(
+                "UPDATE ng_member_cache SET verified_at=$1 WHERE player_id=$2 AND chat_id=$3",
+                (now, pid, chat_id),
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO ng_member_cache (player_id, chat_id, verified_at) VALUES ($1,$2,$3)",
+                (pid, chat_id, now),
+            )
+
+    async def verify_membership(self, bot, pid: int, chat_id: str) -> tuple[bool, str]:
+        """Returns (is_member, detail). detail: member|not_member|api_error"""
+        if await self.membership_cache_ok(pid, chat_id):
+            return True, "cache"
+        if bot is None:
+            return False, "api_error"
+        candidates = [chat_id]
+        if isinstance(chat_id, str) and chat_id.startswith("@"):
+            candidates.append(chat_id[1:])
+        last_err = None
+        for cid in candidates:
+            try:
+                if not hasattr(bot, "get_chat_member"):
+                    return False, "api_error"
+                m = await bot.get_chat_member(cid, pid)
+                if m is None:
+                    last_err = "none"
+                    continue
+                # preferred flag
+                if getattr(m, "is_member", None) is True:
+                    await self.membership_cache_set(pid, chat_id)
+                    return True, "is_member"
+                if getattr(m, "is_member", None) is False:
+                    return False, "not_member"
+                st = str(getattr(m, "status", "") or "").lower()
+                if st in ("member", "administrator", "creator", "owner"):
+                    await self.membership_cache_set(pid, chat_id)
+                    return True, st
+                if st in ("left", "kicked"):
+                    return False, st
+                if st == "restricted":
+                    # restricted users may still be in chat
+                    await self.membership_cache_set(pid, chat_id)
+                    return True, st
+                last_err = st or "unknown"
+            except Exception as e:
+                last_err = str(e)
+                log.warning("get_chat_member fail chat=%s user=%s err=%s", cid, pid, e)
+                continue
+        if last_err in ("none", "left", "kicked", "not_member"):
+            return False, "not_member"
+        return False, "api_error"
+
+    # ---------- atom bomb craft ----------
+    BOMB_URANIUM_COST = 25  # units of res_uranium or res_uranium_90 (90 counts as 2x)
+    BOMB_MONEY_COST = 15_000_000
+
+    async def craft_atom_bomb(self, code: str, pid: int) -> str:
+        """Build abstract game atom bomb from uranium + money."""
+        instant = await self.is_test_mode(pid)
+        async with self.db.transaction() as tx:
+            c = await tx.fetchrow(
+                "SELECT treasury FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
+                (code, pid),
+            )
+            if not c:
+                raise GameError("مالکیت معتبر نیست.")
+            money_cost = 0 if instant else self.BOMB_MONEY_COST
+            if float(c["treasury"]) < money_cost:
+                raise GameError(f"برای ساخت بمب اتم به {int(self.BOMB_MONEY_COST):,} پول نیاز است.")
+            # uranium pool: res_uranium counts 1, res_uranium_90 counts 2
+            u = await tx.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='res_uranium'",
+                (code,),
+            )
+            u90 = await tx.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='res_uranium_90'",
+                (code,),
+            )
+            q_u = float(u["quantity"]) if u else 0.0
+            q_90 = float(u90["quantity"]) if u90 else 0.0
+            need = 0 if instant else float(self.BOMB_URANIUM_COST)
+            points = q_u + q_90 * 2
+            if points < need:
+                raise GameError(
+                    f"اورانیوم کافی نیست. نیاز: {int(need)} واحد "
+                    f"(اورانیوم معمولی=۱، اورانیوم ۹۰٪=۲). موجودی امتیاز: {points:.0f}"
+                )
+            # consume uranium
+            remain = need
+            take90 = min(q_90, remain / 2)
+            # prefer consuming whole units of 90
+            take90 = min(q_90, (remain + 1) // 2) if remain else 0
+            # simpler: consume 90 first
+            take90 = 0.0
+            while remain > 0 and q_90 > 0:
+                q_90 -= 1
+                take90 += 1
+                remain -= 2
+            if remain < 0:
+                remain = 0
+            take_u = min(q_u, remain)
+            remain -= take_u
+            if remain > 0 and not instant:
+                raise GameError("اورانیوم کافی نیست.")
+            if u90:
+                await tx.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='res_uranium_90'",
+                    (q_90, code),
+                )
+            if u:
+                await tx.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='res_uranium'",
+                    (q_u - take_u, code),
+                )
+            if money_cost:
+                await tx.execute(
+                    "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                    (float(c["treasury"]) - money_cost, code),
+                )
+            inv_b = await tx.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='item_atom_bomb'",
+                (code,),
+            )
+            if inv_b:
+                await tx.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='item_atom_bomb'",
+                    (float(inv_b["quantity"]) + 1, code),
+                )
+            else:
+                await tx.execute(
+                    "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,'item_atom_bomb',1)",
+                    (code,),
+                )
+        await self.log_activity("workshop", "ساخت بمب اتم بازی", code, pid)
+        if instant:
+            return "✅ (تست) بمب اتم فوری ساخته شد و به انبار اضافه شد."
+        return (
+            f"✅ بمب اتم ساخته شد.\\n"
+            f"هزینه پول: {int(self.BOMB_MONEY_COST):,}\\n"
+            f"مصرف اورانیوم: {int(self.BOMB_URANIUM_COST)} واحد معادل"
+        )
+
+    async def attack_nuclear(self, attacker: str, defender: str, pid: int) -> str:
+        """Abstract nuclear strike: consumes 1 bomb, deals 25-35% max_hp damage."""
+        meta = await self.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
+        if meta and int(meta.get("war_enabled") or 0) != 1:
+            raise GameError("جنگ توسط سازمان ملل بسته شده است.")
+        if meta and int(meta.get("nuclear_enabled") or 0) != 1:
+            raise GameError("قابلیت هسته‌ای بازی توسط سازمان ملل غیرفعال است. از /panel آن را فعال کنید.")
+        if await self.at_peace(attacker, defender):
+            raise GameError("پیمان صلح فعال است؛ حمله ممکن نیست.")
+        if attacker == defender:
+            raise GameError("نامعتبر")
+        test_atk = await self.is_test_active_for_country(attacker)
+        async with self.db.transaction() as tx:
+            a = await tx.fetchrow(
+                "SELECT * FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
+                (attacker, pid),
+            )
+            d = await tx.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (defender,))
+            if not a or not d or int(d.get("is_destroyed") or 0):
+                raise GameError("هدف معتبر نیست.")
+            if not d.get("owner_player_id"):
+                raise GameError("کشور هدف بدون بازیکن است.")
+            # cooldown
+            ws = await tx.fetchrow("SELECT * FROM ng_war_state WHERE country_code=$1", (attacker,))
+            now = datetime.now(timezone.utc)
+            if ws and ws.get("last_attack_at") and not test_atk:
+                try:
+                    last = datetime.fromisoformat(str(ws["last_attack_at"]).replace("Z", "+00:00"))
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    elapsed = (now - last).total_seconds()
+                    if elapsed < self.ATTACK_COOLDOWN_SEC:
+                        raise GameError(f"محدودیت حمله: {int(self.ATTACK_COOLDOWN_SEC - elapsed)} ثانیه.")
+                except GameError:
+                    raise
+                except Exception:
+                    pass
+            bomb = await tx.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='item_atom_bomb'",
+                (attacker,),
+            )
+            bq = float(bomb["quantity"]) if bomb else 0.0
+            if bq < 1:
+                raise GameError("بمب اتم در انبار ندارید.")
+            await tx.execute(
+                "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='item_atom_bomb'",
+                (bq - 1, attacker),
+            )
+            pct = random.uniform(0.25, 0.35)
+            damage = float(d["max_hp"]) * pct
+            new_hp = max(0.0, float(d["hp"]) - damage)
+            await tx.execute(
+                "UPDATE ng_countries SET hp=$1 WHERE country_code=$2", (new_hp, defender)
+            )
+            seq = int((ws or {}).get("attack_seq") or 0) + 1
+            if ws:
+                await tx.execute(
+                    "UPDATE ng_war_state SET last_attack_at=$1, attack_seq=$2 WHERE country_code=$3",
+                    (now.isoformat(), seq, attacker),
+                )
+            else:
+                await tx.execute(
+                    "INSERT INTO ng_war_state (country_code, last_attack_at, attack_seq) VALUES ($1,$2,$3)",
+                    (attacker, now.isoformat(), seq),
+                )
+            destroyed = new_hp <= 0
+            if destroyed:
+                prev = d.get("owner_player_id")
+                await tx.execute(
+                    "UPDATE ng_countries SET owner_player_id=NULL, is_destroyed=1 WHERE country_code=$1",
+                    (defender,),
+                )
+                if prev:
+                    until = (now + timedelta(hours=48)).isoformat()
+                    await tx.execute(
+                        "UPDATE ng_players SET country_code=NULL, destroy_cooldown_until=$1 WHERE player_id=$2",
+                        (until, int(prev)),
+                    )
+        report = (
+            f"☢️ گزارش حمله اتمی (بازی)\\n\\n"
+            f"مهاجم: {attacker}\\nمدافع: {defender}\\n"
+            f"تخریب: {pct*100:.1f}٪ از حداکثر سلامت\\n"
+            f"خسارت: {int(damage)}\\n"
+            f"سلامت فعلی: {int(new_hp)}/{int(float(d['max_hp']))}\\n"
+            f"بمب مصرف‌شده: ۱"
+        )
+        await self.log_activity("attack", report.replace("\\n", " | "), attacker, pid)
+        await self.broadcast_log("attack", report.replace("\\n", "\n"))
+        if new_hp <= 0:
+            await self.broadcast_log("destroy", f"💥 کشور {defender} در اثر حمله اتمی نابود شد.")
+        return report.replace("\\n", "\n")
 

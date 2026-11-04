@@ -300,3 +300,39 @@ def test_membership_settings(tmp_path):
         assert any(c["chat_id"] == "@warworld3" for c in chats)
         await db.close()
     run(_t())
+
+
+def test_craft_bomb_and_nuclear_attack(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "nuke", owner=1)
+        await g.claim(1, "US")
+        await g.claim(2, "DE")
+        await db.execute("UPDATE ng_countries SET treasury=100000000 WHERE country_code='US'")
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('US','res_uranium',30)"
+        )
+        # enable nuclear
+        await db.execute("UPDATE world_meta SET nuclear_enabled=1 WHERE id=1")
+        msg = await g.craft_atom_bomb("US", 1)
+        assert "بمب" in msg
+        inv = await db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code='US' AND item_code='item_atom_bomb'"
+        )
+        assert float(inv["quantity"]) >= 1
+        report = await g.attack_nuclear("US", "DE", 1)
+        assert "اتمی" in report or "تخریب" in report
+        de = await db.fetchrow("SELECT hp FROM ng_countries WHERE country_code='DE'")
+        assert float(de["hp"]) < 1000
+        await db.close()
+    run(_t())
+
+
+def test_membership_cache(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "mcache")
+        await g.membership_cache_set(42, "@warworld3")
+        assert await g.membership_cache_ok(42, "@warworld3") is True
+        ok, detail = await g.verify_membership(None, 42, "@warworld3")
+        assert ok is True and detail == "cache"
+        await db.close()
+    run(_t())

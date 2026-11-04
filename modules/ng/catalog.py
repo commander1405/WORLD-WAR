@@ -25,6 +25,8 @@ CATALOG = [
     {"item_code":"b_farm","category":"infra","name_fa":"مجتمع کشاورزی","description_fa":"درآمد پایدار کشاورزی","unit_price":2_500_000,"max_per_order":5,"power_score":0,"daily_income":18_000,"maintenance":3000,"is_building":1},
     {"item_code":"b_nuke_peace","category":"nuclear","name_fa":"نیروگاه هسته‌ای صلح‌آمیز","description_fa":"انرژی غیرنظامی — بدون کاربرد تسلیحاتی","unit_price":25_000_000,"max_per_order":1,"power_score":0,"daily_income":120_000,"maintenance":40000,"is_building":1},
     {"item_code":"sp_scientist","category":"specialist","name_fa":"دانشمند","description_fa":"افزایش جزئی درآمد تحقیق","unit_price":1_500_000,"max_per_order":10,"power_score":0,"daily_income":5_000,"maintenance":2000,"is_building":0},
+    {"item_code":"res_uranium_90","category":"nuclear","name_fa":"اورانیوم ۹۰٪","description_fa":"ماده بازی برای ساخت بمب اتم انتزاعی","unit_price":20_000_000,"max_per_order":20,"power_score":0,"daily_income":0,"maintenance":0,"is_building":0},
+    {"item_code":"item_atom_bomb","category":"nuclear","name_fa":"بمب اتم (بازی)","description_fa":"تجهیز انتزاعی حمله هسته‌ای بازی — بدون جزئیات واقعی","unit_price":50_000_000,"max_per_order":5,"power_score":0,"daily_income":0,"maintenance":0,"is_building":0},
     {"item_code":"res_uranium","category":"mine","name_fa":"اورانیوم (واحد بازی)","description_fa":"منبع صلح‌آمیز کارگاه — واحد شمارش بازی","unit_price":50_000,"max_per_order":100,"power_score":0,"daily_income":0,"maintenance":0,"is_building":0},
 ]
 

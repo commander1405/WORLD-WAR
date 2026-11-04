@@ -123,51 +123,76 @@ def register_handlers(bot, app_ctx: dict):
         chats = await game.active_forced_chats()
         if not chats:
             return True
-        bot_obj = bot
         missing = []
+        api_errors = []
         for ch in chats:
             cid = ch["chat_id"]
-            ok = False
-            try:
-                # python-bale-bot membership APIs vary by version
-                if hasattr(bot_obj, "get_chat_member"):
-                    m = await bot_obj.get_chat_member(cid, pid)
-                    status = getattr(m, "status", None) or getattr(m, "user_status", None) or ""
-                    ok = str(status).lower() in ("member", "administrator", "creator", "owner", "admin")
-                elif hasattr(bot_obj, "get_chat"):
-                    # cannot verify — treat as need join if API missing
-                    ok = False
-                else:
-                    ok = False
-            except Exception as e:
-                log.warning("membership check failed chat=%s err=%s", cid, e)
-                ok = False
-            if not ok:
+            ok, detail = await game.verify_membership(bot, pid, cid)
+            if ok:
+                continue
+            if detail == "api_error":
+                api_errors.append(ch)
+            else:
                 missing.append(ch)
-        if not missing:
+        # If API cannot verify but user was recently verified, trust cache
+        if missing or api_errors:
+            # still blocked if confirmed not member
+            if missing:
+                pass
+            elif api_errors and not missing:
+                # soft-allow if all are API errors and at least one cache hit attempted
+                # re-check cache only
+                still = []
+                for ch in api_errors:
+                    if not await game.membership_cache_ok(pid, ch["chat_id"]):
+                        still.append(ch)
+                if not still:
+                    return True
+                missing = still
+        if not missing and not api_errors:
             return True
+        if not missing and api_errors:
+            # cannot verify - ask owner to make bot admin; block with clear message
+            text = (
+                "⚠️ ربات نتوانست عضویت شما را از API بررسی کند.\\n"
+                "معمولاً به این دلیل است که ربات در گروه ادمین نیست.\\n"
+                "پس از ادمین شدن ربات، دوباره «تأیید عضویت» را بزنید."
+            )
+            rows = [[("✅ تلاش مجدد تأیید عضویت", "ng:joincheck")]]
+            target_rows = rows
+            lines = [text]
+            for ch in api_errors:
+                link = ch.get("invite_link") or ""
+                lines.append(f"• {ch.get('title') or ch['chat_id']}: {link}")
+            body = "\\n".join(lines)
+            if is_callback:
+                msg = getattr(message_or_cq, "message", None)
+                if msg:
+                    await msg.reply(body[:3500], components=ik(target_rows))
+            else:
+                await reply(message_or_cq, body, ik(target_rows))
+            return False
         rows = []
         for ch in missing:
-            link = ch.get("invite_link") or f"https://ble.ir/{str(ch['chat_id']).lstrip('@')}"
             rows.append([(f"عضویت در {ch.get('title') or ch['chat_id']}", f"ng:joinlink:{ch['id']}")])
         rows.append([("✅ تأیید عضویت", "ng:joincheck")])
-        text = (
-            "برای استفاده از ربات، ابتدا در گروه رسمی WORLD WAR عضو شوید.\n"
-            "پس از عضویت، دکمه تأیید را بزنید."
-        )
-        # store links in callback via reply with URL buttons if possible — use text links
-        lines = [text, ""]
+        lines = [
+            "برای استفاده از ربات، ابتدا در گروه رسمی WORLD WAR عضو شوید.",
+            "پس از عضویت، دکمه تأیید را بزنید.",
+            "",
+        ]
         for ch in missing:
             link = ch.get("invite_link") or ""
             lines.append(f"• {ch.get('title') or ch['chat_id']}: {link}")
-        target = message_or_cq
+        body = "\\n".join(lines)
         if is_callback:
             msg = getattr(message_or_cq, "message", None)
             if msg:
-                await msg.reply("\n".join(lines)[:3500], components=ik(rows))
+                await msg.reply(body[:3500], components=ik(rows))
         else:
-            await reply(message_or_cq, "\n".join(lines), ik(rows))
+            await reply(message_or_cq, body, ik(rows))
         return False
+
 
     @bot.listen("on_ready")
     async def on_ready():
@@ -492,6 +517,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("📊 وضعیت کارگاه", "ng:ws:status")],
                     [("⚛ تولید اورانیوم", "ng:ws:uranium"), ("🔬 فناوری صلح‌آمیز", "ng:ws:research")],
                     [("⬆️ ارتقای کارگاه", "ng:ws:upgrade")],
+                    [("💣 ساخت بمب اتم", "ng:ws:bomb")],
                     back_row(),
                 ]
                 await reply(message, await game.workshop_status(code), ik(rows))
@@ -834,6 +860,13 @@ def register_handlers(bot, app_ctx: dict):
                     if pwr > 0:
                         rows.append([(f"{label} ۳۰٪", f"ng:fight:{dst}:{kind}:30"), (f"{label} ۵۰٪", f"ng:fight:{dst}:{kind}:50")])
                         rows.append([(f"{label} ۱۰۰٪", f"ng:fight:{dst}:{kind}:100")])
+                # atomic option if has bomb
+                bombs = await game.db.fetchrow(
+                    "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='item_atom_bomb'",
+                    (code,),
+                )
+                if bombs and float(bombs["quantity"]) >= 1:
+                    rows.append([("☢️ حمله با بمب اتم", f"ng:nuke:{dst}")])
                 if not rows:
                     await out("❌ هیچ نیروی قابل‌استفاده‌ای برای انواع حمله ندارید.")
                     return
@@ -847,6 +880,29 @@ def register_handlers(bot, app_ctx: dict):
                 _, _, dst, kind, pct = data.split(":")
                 try:
                     await out(await game.attack(code, dst, kind, float(pct), pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:nuke:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                dst = data.split(":")[-1]
+                rows = [[("✅ تأیید حمله اتمی", f"ng:nukego:{dst}"), ("❌ انصراف", "ng:home")]]
+                await out(
+                    f"⚠️ حمله اتمی به {dst}\n"
+                    "یک بمب اتم از انبار مصرف می‌شود.\n"
+                    "۲۵ تا ۳۵ درصد سلامت کشور هدف به‌صورت تصادفی کاهش می‌یابد.\n"
+                    "ادامه؟",
+                    ik(rows),
+                )
+                return
+            if data.startswith("ng:nukego:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    await out(await game.attack_nuclear(code, data.split(":")[-1], pid))
                 except GameError as e:
                     await out(f"❌ {e}")
                 return
@@ -870,6 +926,8 @@ def register_handlers(bot, app_ctx: dict):
                         await out(await game.start_research_job(code, pid))
                     elif data == "ng:ws:upgrade":
                         await out(await game.workshop_upgrade(code, pid))
+                    elif data == "ng:ws:bomb":
+                        await out(await game.craft_atom_bomb(code, pid))
                 except GameError as e:
                     await out(f"❌ {e}")
                 return
