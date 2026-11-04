@@ -491,7 +491,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             if text == BTN_WORLD:
-                await reply(message, await game.world_status_text(), main_kb(owner))
+                await reply(message, await game.world_status_text(for_owner=owner), main_kb(owner))
                 return
 
             if text == BTN_REPORT:
@@ -1026,7 +1026,7 @@ def register_handlers(bot, app_ctx: dict):
                 await out("\n".join(lines))
                 return
             if data == "ng:o:world":
-                await out(await game.world_status_text())
+                await out(await game.world_status_text(for_owner=owner))
                 return
             if data.startswith("ng:owar:"):
                 await out(await game.set_war(pid, data.endswith(":1")))

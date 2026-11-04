@@ -45,9 +45,19 @@ async def group_log_loop(game: Game, bot):
                 text = r.get("summary") or ""
                 if not text:
                     continue
+                kind = r.get("kind") or ""
                 try:
+                    msg = None
                     if hasattr(bot, "send_message"):
-                        await bot.send_message(MAIN_GROUP, text[:3500])
+                        msg = await bot.send_message(MAIN_GROUP, text[:3500])
+                    # Pin UN statements
+                    if kind == "group_pin_statement" and msg is not None:
+                        mid = getattr(msg, "message_id", None) or getattr(msg, "id", None)
+                        if mid is not None:
+                            if hasattr(bot, "pin_chat_message"):
+                                await bot.pin_chat_message(MAIN_GROUP, mid)
+                            elif hasattr(bot, "pin_message"):
+                                await bot.pin_message(MAIN_GROUP, mid)
                 except Exception:
                     log.exception("group log send failed")
                     await game.log_activity(r.get("kind") or "group_log", text)

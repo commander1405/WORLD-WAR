@@ -336,3 +336,27 @@ def test_membership_cache(tmp_path):
         assert ok is True and detail == "cache"
         await db.close()
     run(_t())
+
+
+def test_un_country_owner_only(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "un", owner=99)
+        await g.bootstrap()
+        rows_public = await g.list_countries(for_owner=False)
+        assert all(r["country_code"] != "UN" for r in rows_public)
+        assert len(rows_public) == 30
+        rows_owner = await g.list_countries(for_owner=True)
+        assert any(r["country_code"] == "UN" for r in rows_owner)
+        assert len(rows_owner) == 31
+        code = await g.player_country(99)
+        assert code == "UN"
+        with pytest.raises(GameError):
+            await g.claim(1, "UN")
+        # normal claim still works
+        await g.claim(1, "US")
+        text = await g.world_status_text(for_owner=False)
+        assert "30" in text
+        text2 = await g.world_status_text(for_owner=True)
+        assert "31" in text2
+        await db.close()
+    run(_t())

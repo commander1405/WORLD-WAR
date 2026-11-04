@@ -15,6 +15,7 @@ from modules.ng.catalog import CATALOG, CAT_FA
 log = logging.getLogger(__name__)
 TEHRAN = ZoneInfo("Asia/Tehran")
 SEED_PATH = Path(__file__).resolve().parents[2] / "data" / "countries" / "seed_ng.json"
+UN_CODE = "UN"
 
 
 class GameError(Exception):
@@ -42,6 +43,7 @@ class Game:
             )
         await self._seed_catalog()
         await self._seed_countries()
+        await self.ensure_un_country()
         await self._seed_bot_settings()
         await self._seed_membership()
 
@@ -95,7 +97,56 @@ class Game:
                 ),
             )
 
+
+    async def ensure_un_country(self) -> None:
+        """Ensure UN country exists and is permanently owned by the bot owner."""
+        if not self.owner_id:
+            return
+        row = await self.db.fetchrow(
+            "SELECT * FROM ng_countries WHERE country_code=$1", (UN_CODE,)
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        if not row:
+            await self.db.execute(
+                """
+                INSERT INTO ng_countries (
+                    country_code, name_fa, name_en, flag, capital_fa, leader_fa, leader_title_fa,
+                    currency_code, currency_name_fa, npt_member, owner_player_id, treasury, hp, max_hp, is_destroyed, claimed_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$11,1000,1000,0,$12)
+                """,
+                (
+                    UN_CODE, "سازمان ملل", "United Nations", "🇺🇳", "نیویورک",
+                    "دبیرکل سازمان ملل", "دبیرکل", "UND", "واحد سازمان ملل",
+                    self.owner_id, 200_000_000.0, now,
+                ),
+            )
+        else:
+            await self.db.execute(
+                """
+                UPDATE ng_countries
+                SET owner_player_id=$1, is_destroyed=0, name_fa='سازمان ملل', flag='🇺🇳'
+                WHERE country_code=$2
+                """,
+                (self.owner_id, UN_CODE),
+            )
+        # bind owner player row
+        p = await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (self.owner_id,))
+        if not p:
+            await self.db.execute(
+                "INSERT INTO ng_players (player_id, username, display_name, country_code, joined_at, last_seen_at) VALUES ($1,$2,$3,$4,$5,$5)",
+                (self.owner_id, "owner", "مالک", UN_CODE, now),
+            )
+        else:
+            # only force UN if owner has no other country or already UN
+            cur = p.get("country_code")
+            if not cur or cur == UN_CODE:
+                await self.db.execute(
+                    "UPDATE ng_players SET country_code=$1 WHERE player_id=$2",
+                    (UN_CODE, self.owner_id),
+                )
+
     def starting_capital(self, code: str) -> float:
+
         data = {c["code"]: c for c in json.loads(SEED_PATH.read_text(encoding="utf-8"))}
         mult = float(data.get(code, {}).get("capital_mult", 0.8))
         base = random.uniform(50_000_000, 100_000_000)
@@ -115,6 +166,8 @@ class Game:
                 "INSERT INTO ng_players (player_id, username, display_name, joined_at, last_seen_at) VALUES ($1,$2,$3,$4,$4)",
                 (pid, username, display, now),
             )
+        if self.owner_id and int(pid) == int(self.owner_id):
+            await self.ensure_un_country()
         return await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (pid,))
 
     async def assert_not_banned(self, pid: int) -> None:
@@ -135,18 +188,26 @@ class Game:
                 raise GameError("شما مسدود شده‌اید و نمی‌توانید از بازی استفاده کنید.")
 
     async def player_country(self, pid: int) -> Optional[str]:
+        if self.owner_id and int(pid) == int(self.owner_id):
+            await self.ensure_un_country()
+            return UN_CODE
         p = await self.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (pid,))
         return (p or {}).get("country_code")
 
     # ---------- claim ----------
-    async def list_countries(self) -> list[dict]:
-        return await self.db.fetch(
+    async def list_countries(self, *, for_owner: bool = False, include_un: bool = False) -> list[dict]:
+        rows = await self.db.fetch(
             "SELECT * FROM ng_countries WHERE is_destroyed=0 ORDER BY name_fa"
         )
+        if for_owner or include_un:
+            return rows
+        return [r for r in rows if r.get("country_code") != UN_CODE]
 
     async def claim(self, pid: int, code: str) -> dict:
         await self.assert_not_banned(pid)
         code = code.upper()
+        if code == UN_CODE:
+            raise GameError("کشور سازمان ملل فقط متعلق به مالک بازی است و قابل انتخاب نیست.")
         p = await self.touch_player(pid)
         if p.get("country_code"):
             raise GameError("شما هم‌اکنون یک کشور دارید.")
@@ -873,6 +934,16 @@ class Game:
         nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_statements")
         now = datetime.now(timezone.utc).isoformat()
         sid = int(nid["id"])
+        if code == UN_CODE and self.is_owner(pid):
+            await self.db.execute(
+                "INSERT INTO ng_statements (id, country_code, player_id, body, status, created_at, reviewed_at) VALUES ($1,$2,$3,$4,'approved',$5,$5)",
+                (sid, code, pid, body[:2000], now),
+            )
+            text = "🇺🇳 بیانیه رسمی سازمان ملل\n\n" + body[:2000]
+            text = "🇺🇳 بیانیه رسمی سازمان ملل" + chr(10) + chr(10) + body[:2000]
+            await self.broadcast_log("statement", text)
+            await self.log_activity("group_pin_statement", text, UN_CODE, pid)
+            return "✅ بیانیه سازمان ملل منتشر شد و برای پین در گروه اصلی صف شد."
         await self.db.execute(
             "INSERT INTO ng_statements (id, country_code, player_id, body, status, created_at) VALUES ($1,$2,$3,$4,'pending',$5)",
             (sid, code, pid, body[:2000], now),
@@ -880,10 +951,10 @@ class Game:
         c = await self.db.fetchrow("SELECT name_fa FROM ng_countries WHERE country_code=$1", (code,))
         name = (c or {}).get("name_fa") or code
         owner_body = (
-            f"📢 بیانیه جدید\n\nمتن:\n{body[:1500]}\n\n"
-            f"شناسه فرستنده:\n{pid}\n\nکشور:\n{name}"
+            "📢 بیانیه جدید" + chr(10) + chr(10) + "متن:" + chr(10) + body[:1500] + chr(10) + chr(10)
+            + "شناسه فرستنده:" + chr(10) + str(pid) + chr(10) + chr(10) + "کشور:" + chr(10) + str(name)
         )
-        await self._owner_inbox("statement", sid, f"بیانیه — {name}", owner_body.replace("\\n", "\n"))
+        await self._owner_inbox("statement", sid, f"بیانیه — {name}", owner_body)
         return "✅ بیانیه برای بررسی مالک ارسال شد."
 
     async def review_statement(self, sid: int, approve: bool, actor: int) -> str:
@@ -901,12 +972,22 @@ class Game:
             c = await self.db.fetchrow(
                 "SELECT * FROM ng_countries WHERE country_code=$1", (s["country_code"],)
             )
-            text = (
-                f"📜 بیانیه رسمی کشور {c['name_fa']}\n"
-                f"با رهبری {c['leader_fa']}\n\n"
-                f"او در پی سخنرانی خود گفت:\n{s['body']}"
-            )
+            is_un = (s["country_code"] == UN_CODE) or (c and c.get("country_code") == UN_CODE)
+            if is_un:
+                text = (
+                    f"🇺🇳 بیانیه رسمی سازمان ملل\n\n"
+                    f"{s['body']}"
+                )
+            else:
+                text = (
+                    f"📜 بیانیه رسمی کشور {c['name_fa']}\n"
+                    f"با رهبری {c['leader_fa']}\n\n"
+                    f"او در پی سخنرانی خود گفت:\n{s['body']}"
+                )
             await self.broadcast_log("statement", text)
+            # queue pin for UN statements
+            if is_un:
+                await self.log_activity("group_pin_statement", text)
             return text
         return "بیانیه رد شد."
 
@@ -979,15 +1060,21 @@ class Game:
             for t in tables:
                 await tx.execute(f"DELETE FROM {t}")
             await tx.execute(
-                "UPDATE ng_countries SET owner_player_id=NULL, treasury=0, daily_income=0, daily_expense=0, hp=1000, is_destroyed=0, peace_penalty_until=NULL, claimed_at=NULL"
+                "UPDATE ng_countries SET owner_player_id=NULL, treasury=0, daily_income=0, daily_expense=0, hp=1000, is_destroyed=0, peace_penalty_until=NULL, claimed_at=NULL WHERE country_code<>$1",
+                (UN_CODE,),
+            )
+            await tx.execute(
+                "UPDATE ng_countries SET owner_player_id=$1, is_destroyed=0, treasury=200000000, hp=1000 WHERE country_code=$2",
+                (self.owner_id, UN_CODE),
             )
             now = datetime.now(timezone.utc).isoformat()
             await tx.execute(
                 "UPDATE world_meta SET started_at=$1, reset_count=reset_count+1, war_enabled=1, nuclear_enabled=0 WHERE id=1",
                 (now,),
             )
+        await self.ensure_un_country()
         await self.admin_log(actor, "full_reset", "world wiped")
-        return "🔴 جهان به‌طور کامل ریست شد. کشورها آزاد هستند."
+        return "🔴 جهان به‌طور کامل ریست شد. کشورها آزاد هستند. سازمان ملل برای مالک باقی ماند."
 
     async def admin_log(self, actor: int, action: str, detail: str) -> None:
         nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_admin_log")
@@ -1246,11 +1333,13 @@ class Game:
             await self.db.execute("DELETE FROM ng_activity WHERE id=$1", (r["id"],))
         return rows
 
-    async def world_status_text(self) -> str:
+    async def world_status_text(self, *, for_owner: bool = False) -> str:
         meta = await self.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
-        countries = await self.list_countries()
-        free = sum(1 for c in countries if not c.get("owner_player_id"))
-        owned = sum(1 for c in countries if c.get("owner_player_id"))
+        countries = await self.list_countries(for_owner=for_owner)
+        free = sum(1 for c in countries if not c.get("owner_player_id") and c.get("country_code") != UN_CODE)
+        owned = sum(1 for c in countries if c.get("owner_player_id") and c.get("country_code") != UN_CODE)
+        total_public = 30
+        total_shown = len([c for c in countries if c.get("country_code") != UN_CODE]) if not for_owner else len(countries)
         war = "باز" if meta and int(meta.get("war_enabled") or 0) else "بسته"
         nuke = "فعال" if meta and int(meta.get("nuclear_enabled") or 0) else "غیرفعال"
         lines = [
@@ -1258,6 +1347,7 @@ class Game:
             f"شروع جهان: {(meta or {}).get('started_at') or '—'}",
             f"جنگ: {war}",
             f"هسته‌ای بازی: {nuke}",
+            f"تعداد کشورها: {30 if not for_owner else 31}",
             f"کشور آزاد: {free} | دارای بازیکن: {owned}",
             f"ریست‌ها: {int((meta or {}).get('reset_count') or 0)}",
         ]
