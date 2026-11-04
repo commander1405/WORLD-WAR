@@ -17,6 +17,8 @@ from engine.world_ticker import WorldTicker
 from modules.players.service import PlayerService
 from modules.countries.seed import seed_countries
 from modules.countries.management import CountryManagement
+from modules.markets.service import MarketService
+from modules.trade.service import TradeService
 from bot.main import create_bot, register_handlers
 
 logging.basicConfig(
@@ -56,9 +58,12 @@ async def async_main() -> None:
         management = CountryManagement(db, world, economy)
         await management.ensure_schema()
         ai = AIEngine(db, world, management)
+        market = MarketService(db, world)
+        await market.ensure_seed()
+        trade = TradeService(db, market)
 
         interval = int(os.getenv("WORLD_TICK_INTERVAL", "300"))
-        ticker = WorldTicker(db, world, ai, interval_seconds=interval)
+        ticker = WorldTicker(db, world, ai, market=market, interval_seconds=interval)
 
         app_ctx = {
             "settings": settings,
@@ -70,6 +75,8 @@ async def async_main() -> None:
             "economy": economy,
             "management": management,
             "ai": ai,
+            "market": market,
+            "trade": trade,
             "ticker": ticker,
         }
 

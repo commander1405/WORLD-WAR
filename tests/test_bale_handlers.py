@@ -31,6 +31,8 @@ def test_register_handlers_adds_on_message():
         "world": MagicMock(),
         "db": MagicMock(),
         "management": MagicMock(),
+        "market": MagicMock(),
+        "trade": MagicMock(),
         "settings": MagicMock(database_mode="sqlite"),
     }
     # players methods used in handler body only when called

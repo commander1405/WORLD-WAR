@@ -21,11 +21,13 @@ class WorldTicker:
         world: WorldEngine,
         ai,
         *,
+        market=None,
         interval_seconds: int = 300,
     ):
         self.db = db
         self.world = world
         self.ai = ai
+        self.market = market
         self.interval = max(30, int(interval_seconds))
         self._task: asyncio.Task | None = None
         self._stopping = False
@@ -97,6 +99,12 @@ class WorldTicker:
 
         # Outside lock: AI decisions (each writes its own rows)
         n = await self.ai.tick_all(limit=30)
+        produced = 0
+        if self.market is not None:
+            try:
+                produced = await self.market.produce_buildings()
+            except Exception:
+                log.exception("building production failed")
         gdate = await self.world.current_game_date()
         await self.db.execute(
             """
@@ -107,7 +115,7 @@ class WorldTicker:
                 gdate.isoformat(),
                 now_iso,
                 "world_tick",
-                f"Automatic AI tick processed {n} countries",
+                f"Automatic AI tick processed {n} countries; production={produced}",
             ),
         )
         if n > 0:
