@@ -158,3 +158,77 @@ def test_ban_by_username(tmp_path):
         await g.assert_not_banned(3)
         await db.close()
     run(_t())
+
+
+def test_workshop_upgrade_and_jobs(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path)
+        await g.claim(1, "US")
+        # give refinery + scientist + money
+        await db.execute("UPDATE ng_countries SET treasury=500000000 WHERE country_code='US'")
+        await g.admin_give_item(1, "US", "b_refinery", 1)  # not owner - will fail
+        await db.close()
+    try:
+        run(_t())
+    except Exception:
+        pass
+
+    async def _t2():
+        db, g = await boot(tmp_path / "w2", owner=1)
+        await g.claim(1, "US")
+        await db.execute("UPDATE ng_countries SET treasury=500000000 WHERE country_code='US'")
+        await g.admin_give_item(1, "US", "b_refinery", 1)
+        await g.admin_give_item(1, "US", "sp_scientist", 1)
+        msg = await g.workshop_upgrade("US", 1)
+        assert "ارتق" in msg
+        msg2 = await g.start_uranium_job("US", 1)
+        assert "شروع" in msg2
+        # force complete
+        await db.execute(
+            "UPDATE ng_workshop_jobs SET finishes_at=$1 WHERE country_code='US' AND status='running'",
+            ("2000-01-01T00:00:00+00:00",),
+        )
+        n = await g.complete_due_jobs("US")
+        assert n >= 1
+        inv = await db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code='US' AND item_code='res_uranium'"
+        )
+        assert inv and float(inv["quantity"]) > 0
+        await g.start_research_job("US", 1)
+        await db.close()
+    run(_t2())
+
+
+def test_npt_request_and_review(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "npt", owner=9)
+        await g.claim(1, "IL")  # non-member seed
+        c = await db.fetchrow("SELECT npt_member FROM ng_countries WHERE country_code='IL'")
+        assert int(c["npt_member"]) == 0
+        await g.request_npt_change("IL", 1, "join")
+        rows = await g.pending_npt_list()
+        assert rows
+        rid = rows[0]["id"]
+        with pytest.raises(GameError):
+            await g.review_npt(rid, True, 1)  # not owner
+        await g.review_npt(rid, True, 9)
+        c2 = await db.fetchrow("SELECT npt_member FROM ng_countries WHERE country_code='IL'")
+        assert int(c2["npt_member"]) == 1
+        # double review fails
+        with pytest.raises(GameError):
+            await g.review_npt(rid, True, 9)
+        await db.close()
+    run(_t())
+
+
+def test_settings_start_about(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "set", owner=3)
+        await g.set_setting(3, "start_message", "سلام تست شروع")
+        assert "سلام تست" in await g.get_setting("start_message")
+        await g.reset_setting(3, "start_message")
+        assert "جنگ جهانی" in await g.get_setting("start_message")
+        await g.set_setting(3, "about_message", "درباره تست")
+        assert "درباره تست" == await g.get_setting("about_message")
+        await db.close()
+    run(_t())

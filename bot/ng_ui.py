@@ -28,6 +28,9 @@ BTN_WORLD = "🌍 جهان"
 BTN_REPORT = "📊 گزارش‌ها"
 BTN_PICK = "🗺 انتخاب کشور"
 BTN_OWNER = "🛡 پنل مالک"
+BTN_WORKSHOP = "🏭 کارگاه"
+BTN_ABOUT = "ℹ️ درباره ما"
+BTN_TREATY = "⚖ پیمان‌ها"
 
 _pending: dict[int, dict] = {}
 
@@ -36,12 +39,13 @@ def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
     kb = MenuKeyboardMarkup()
     rows = [
         [BTN_MY, BTN_ECO],
-        [BTN_SHOP, BTN_INV],
-        [BTN_MKT, BTN_TRADE],
-        [BTN_DIPLO, BTN_PEACE],
+        [BTN_WORKSHOP, BTN_SHOP],
+        [BTN_INV, BTN_MKT],
+        [BTN_TRADE, BTN_DIPLO],
+        [BTN_PEACE, BTN_TREATY],
         [BTN_ATTACK, BTN_STMT],
         [BTN_WORLD, BTN_REPORT],
-        [BTN_PICK],
+        [BTN_ABOUT, BTN_PICK],
     ]
     if is_owner:
         rows.append([BTN_OWNER])
@@ -216,16 +220,27 @@ def register_handlers(bot, app_ctx: dict):
                         msg = f"❌ {e}"
                     await reply(message, msg, main_kb(owner))
                     return
+                if kind == "edit_start":
+                    _pending.pop(pid, None)
+                    try:
+                        msg = await game.set_setting(pid, "start_message", text)
+                    except GameError as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "edit_about":
+                    _pending.pop(pid, None)
+                    try:
+                        msg = await game.set_setting(pid, "about_message", text)
+                    except GameError as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
 
             # ---- main menu ----
             if text in ("/start", "شروع", "منو", "menu"):
-                await reply(
-                    message,
-                    "🕹 جنگ جهانی — نسل جدید\n"
-                    "کشور بسازید، اقتصاد را مدیریت کنید، تجارت و جنگ و صلح را پیش ببرید.\n"
-                    "همه کارها با دکمه انجام می‌شود.",
-                    main_kb(owner),
-                )
+                start_msg = await game.get_setting("start_message", game.DEFAULT_START)
+                await reply(message, start_msg, main_kb(owner))
                 return
 
             if text == BTN_PICK:
@@ -385,12 +400,47 @@ def register_handlers(bot, app_ctx: dict):
                 await reply(message, "\n".join(lines), main_kb(owner))
                 return
 
+
+            if text == BTN_WORKSHOP:
+                if not code:
+                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    return
+                await game.complete_due_jobs(code)
+                rows = [
+                    [("📊 وضعیت کارگاه", "ng:ws:status")],
+                    [("⚛ تولید اورانیوم", "ng:ws:uranium"), ("🔬 فناوری صلح‌آمیز", "ng:ws:research")],
+                    [("⬆️ ارتقای کارگاه", "ng:ws:upgrade")],
+                    back_row(),
+                ]
+                await reply(message, await game.workshop_status(code), ik(rows))
+                return
+
+            if text == BTN_ABOUT:
+                about = await game.get_setting("about_message", game.DEFAULT_ABOUT)
+                await reply(message, about, main_kb(owner))
+                return
+
+            if text == BTN_TREATY:
+                if not code:
+                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    return
+                c = await game.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
+                st = "عضو NPT" if int(c["npt_member"]) else "غیرعضو NPT"
+                rows = [
+                    [("عضویت در NPT", "ng:npt:join"), ("خروج از NPT", "ng:npt:leave")],
+                    back_row(),
+                ]
+                await reply(message, f"⚖ پیمان‌ها\nوضعیت فعلی: {st}", ik(rows))
+                return
+
             if text == BTN_OWNER and owner:
                 rows = [
                     [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
                     [("جنگ باز", "ng:owar:1"), ("جنگ بسته", "ng:owar:0")],
                     [("هسته‌ای فعال", "ng:onuke:1"), ("هسته‌ای خاموش", "ng:onuke:0")],
-                    [("بیانیه‌ها", "ng:ostmt"), ("تنظیم لاگ‌ها", "ng:ologs")],
+                    [("بیانیه‌ها", "ng:ostmt"), ("درخواست‌های NPT", "ng:onpt")],
+                    [("تنظیم لاگ‌ها", "ng:ologs")],
+                    [("📝 پیام /start", "ng:ostart"), ("ℹ️ درباره ما", "ng:oabout")],
                     [("بن کاربر", "ng:oban"), ("آنبن کاربر", "ng:ounban")],
                     [("تغییر پول کشور", "ng:omoney")],
                     [("🔴 ریست کامل جهان", "ng:oreset1")],
@@ -717,6 +767,111 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner panel
+
+            # workshop
+            if data.startswith("ng:ws:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    if data == "ng:ws:status":
+                        await out(await game.workshop_status(code), ik([
+                            [("⚛ اورانیوم", "ng:ws:uranium"), ("🔬 تحقیق", "ng:ws:research")],
+                            [("⬆️ ارتقا", "ng:ws:upgrade")], back_row()
+                        ]))
+                    elif data == "ng:ws:uranium":
+                        await out(await game.start_uranium_job(code, pid))
+                    elif data == "ng:ws:research":
+                        await out(await game.start_research_job(code, pid))
+                    elif data == "ng:ws:upgrade":
+                        await out(await game.workshop_upgrade(code, pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+
+            if data.startswith("ng:npt:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                action = data.split(":")[-1]
+                rows = [[("✅ تأیید درخواست", f"ng:nptgo:{action}"), ("❌ انصراف", "ng:home")]]
+                label = "عضویت در NPT" if action == "join" else "خروج از NPT"
+                await out(f"آیا از ارسال درخواست «{label}» مطمئن هستید؟\nپس از ارسال، مالک باید تأیید کند.", ik(rows))
+                return
+            if data.startswith("ng:nptgo:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    await out(await game.request_npt_change(code, pid, data.split(":")[-1]))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+
+            if data == "ng:onpt":
+                rows_db = await game.pending_npt_list()
+                btns = []
+                lines = ["درخواست‌های NPT"]
+                for r in rows_db[:15]:
+                    label = "عضویت" if r["request_type"] == "join" else "خروج"
+                    lines.append(f"#{r['id']} {r['country_code']} — {label} — بازیکن {r['player_id']}")
+                    btns.append([
+                        (f"✅#{r['id']}", f"ng:nptok:{r['id']}"),
+                        (f"❌#{r['id']}", f"ng:nptno:{r['id']}"),
+                    ])
+                btns.append(back_row())
+                await out("\n".join(lines) if rows_db else "درخواست معلقی نیست", ik(btns))
+                return
+            if data.startswith("ng:nptok:"):
+                try:
+                    await out(await game.review_npt(int(data.split(":")[-1]), True, pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:nptno:"):
+                try:
+                    await out(await game.review_npt(int(data.split(":")[-1]), False, pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+
+            if data == "ng:ostart":
+                cur = await game.get_setting("start_message", game.DEFAULT_START)
+                rows = [
+                    [("✏️ ویرایش", "ng:ostart:edit"), ("↩️ پیش‌فرض", "ng:ostart:reset")],
+                    back_row(),
+                ]
+                await out("📝 پیام /start فعلی:\n\n" + cur[:1500], ik(rows))
+                return
+            if data == "ng:ostart:edit":
+                _pending[pid] = {"kind": "edit_start"}
+                await out("متن جدید خوشامدگویی را ارسال کنید:")
+                return
+            if data == "ng:ostart:reset":
+                try:
+                    await out(await game.reset_setting(pid, "start_message"))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:oabout":
+                cur = await game.get_setting("about_message", game.DEFAULT_ABOUT)
+                rows = [
+                    [("✏️ ویرایش", "ng:oabout:edit"), ("↩️ پیش‌فرض", "ng:oabout:reset")],
+                    back_row(),
+                ]
+                await out("ℹ️ متن درباره ما:\n\n" + cur[:1500], ik(rows))
+                return
+            if data == "ng:oabout:edit":
+                _pending[pid] = {"kind": "edit_about"}
+                await out("متن جدید درباره ما را ارسال کنید:")
+                return
+            if data == "ng:oabout:reset":
+                try:
+                    await out(await game.reset_setting(pid, "about_message"))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+
             if data == "ng:o:players":
                 players = await game.list_players()
                 lines = ["بازیکنان"]

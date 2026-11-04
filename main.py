@@ -26,13 +26,15 @@ async def daily_loop(game: Game):
             n = await game.daily_payout_all()
             if n:
                 log.info("Daily payout countries=%s", n)
+            done = await game.complete_due_jobs()
+            if done:
+                log.info("Workshop jobs completed=%s", done)
         except Exception:
-            log.exception("daily payout")
+            log.exception("daily/workshop loop")
         await asyncio.sleep(60)
 
 
 async def group_log_loop(game: Game, bot):
-    """Flush queued group logs to main Bale group when possible."""
     while True:
         try:
             rows = await game.pop_group_logs(10)
@@ -45,11 +47,34 @@ async def group_log_loop(game: Game, bot):
                         await bot.send_message(MAIN_GROUP, text[:3500])
                 except Exception:
                     log.exception("group log send failed")
-                    # re-queue lightly
                     await game.log_activity(r.get("kind") or "group_log", text)
         except Exception:
             log.exception("group log loop")
         await asyncio.sleep(15)
+
+
+async def owner_inbox_loop(game: Game, bot, owner_id: int):
+    if not owner_id:
+        return
+    while True:
+        try:
+            rows = await game.pop_owner_inbox(5)
+            for r in rows:
+                text = f"{r.get('title') or ''}\n\n{r.get('body') or ''}\n\nاز پنل مالک بررسی کنید."
+                try:
+                    if hasattr(bot, "send_message"):
+                        await bot.send_message(int(owner_id), text[:3500])
+                except Exception:
+                    log.exception("owner inbox send failed")
+                    await game._owner_inbox(
+                        r.get("kind") or "note",
+                        int(r.get("ref_id") or 0),
+                        r.get("title") or "",
+                        r.get("body") or "",
+                    )
+        except Exception:
+            log.exception("owner inbox loop")
+        await asyncio.sleep(12)
 
 
 async def async_main() -> None:
@@ -73,6 +98,7 @@ async def async_main() -> None:
         bot = await create_bot(settings.bale_token)
         register_handlers(bot, {"game": game, "settings": settings, "db": db})
         asyncio.create_task(group_log_loop(game, bot))
+        asyncio.create_task(owner_inbox_loop(game, bot, settings.owner_id))
         log.info("Starting bot connect()")
         async with bot:
             await bot.connect()

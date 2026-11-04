@@ -42,6 +42,7 @@ class Game:
             )
         await self._seed_catalog()
         await self._seed_countries()
+        await self._seed_bot_settings()
 
     def _default_logs(self) -> dict:
         keys = [
@@ -690,10 +691,19 @@ class Game:
         if len(body) < 5:
             raise GameError("متن بیانیه خیلی کوتاه است.")
         nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_statements")
+        now = datetime.now(timezone.utc).isoformat()
+        sid = int(nid["id"])
         await self.db.execute(
             "INSERT INTO ng_statements (id, country_code, player_id, body, status, created_at) VALUES ($1,$2,$3,$4,'pending',$5)",
-            (int(nid["id"]), code, pid, body[:2000], datetime.now(timezone.utc).isoformat()),
+            (sid, code, pid, body[:2000], now),
         )
+        c = await self.db.fetchrow("SELECT name_fa FROM ng_countries WHERE country_code=$1", (code,))
+        name = (c or {}).get("name_fa") or code
+        owner_body = (
+            f"📢 بیانیه جدید\n\nمتن:\n{body[:1500]}\n\n"
+            f"شناسه فرستنده:\n{pid}\n\nکشور:\n{name}"
+        )
+        await self._owner_inbox("statement", sid, f"بیانیه — {name}", owner_body.replace("\\n", "\n"))
         return "✅ بیانیه برای بررسی مالک ارسال شد."
 
     async def review_statement(self, sid: int, approve: bool, actor: int) -> str:
@@ -783,6 +793,7 @@ class Game:
         tables = [
             "ng_cart","ng_market","ng_peace","ng_statements","ng_daily_payouts",
             "ng_activity","ng_admin_log","ng_buildings","ng_inventory","ng_players",
+            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox",
         ]
         async with self.db.transaction() as tx:
             for t in tables:
@@ -1071,3 +1082,452 @@ class Game:
             f"ریست‌ها: {int((meta or {}).get('reset_count') or 0)}",
         ]
         return "\n".join(lines)
+
+
+    DEFAULT_START = (
+        "🕹 به جنگ جهانی خوش آمدید\n"
+        "نسل جدید — مدیریت کشور، اقتصاد، دیپلماسی و جنگ\n"
+        "از دکمه‌های پایین برای شروع استفاده کنید."
+    )
+    DEFAULT_ABOUT = (
+        "📖 درباره جنگ جهانی\n\n"
+        "یک بازی چندنفره کشور‌داری با اقتصاد درون‌بازی، تجارت، صلح و جنگ انتزاعی.\n"
+        "تمام عملیات با دکمه انجام می‌شود.\n"
+        "سازمان ملل توسط مالک بازی مدیریت می‌شود."
+    )
+
+    # Workshop balance (server-side)
+    WS_MAX_LEVEL = 10
+    WS_UPGRADE_BASE = 2_000_000
+    WS_URANIUM_BASE_COST = 500_000
+    WS_URANIUM_BASE_AMOUNT = 10
+    WS_URANIUM_BASE_MINUTES = 30
+    WS_RESEARCH_BASE_COST = 800_000
+    WS_RESEARCH_BASE_POINTS = 1
+    WS_RESEARCH_BASE_MINUTES = 45
+
+    async def _seed_bot_settings(self) -> None:
+        defaults = {
+            "start_message": self.DEFAULT_START,
+            "about_message": self.DEFAULT_ABOUT,
+        }
+        for k, v in defaults.items():
+            row = await self.db.fetchrow("SELECT key FROM ng_bot_settings WHERE key=$1", (k,))
+            if not row:
+                await self.db.execute(
+                    "INSERT INTO ng_bot_settings (key, value) VALUES ($1,$2)", (k, v)
+                )
+
+    async def get_setting(self, key: str, default: str = "") -> str:
+        row = await self.db.fetchrow("SELECT value FROM ng_bot_settings WHERE key=$1", (key,))
+        return (row["value"] if row else default) or default
+
+    async def set_setting(self, actor: int, key: str, value: str) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        value = (value or "").strip()
+        if len(value) < 3:
+            raise GameError("متن خیلی کوتاه است.")
+        if len(value) > 3500:
+            raise GameError("متن خیلی بلند است.")
+        row = await self.db.fetchrow("SELECT key FROM ng_bot_settings WHERE key=$1", (key,))
+        if row:
+            await self.db.execute(
+                "UPDATE ng_bot_settings SET value=$1 WHERE key=$2", (value, key)
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO ng_bot_settings (key, value) VALUES ($1,$2)", (key, value)
+            )
+        await self.admin_log(actor, "set_setting", key)
+        await self.log_activity("admin", f"تغییر تنظیم {key}", player_id=actor)
+        return "✅ متن ذخیره شد."
+
+    async def reset_setting(self, actor: int, key: str) -> str:
+        if key == "start_message":
+            return await self.set_setting(actor, key, self.DEFAULT_START)
+        if key == "about_message":
+            return await self.set_setting(actor, key, self.DEFAULT_ABOUT)
+        raise GameError("کلید نامعتبر")
+
+    async def ensure_workshop(self, code: str) -> dict:
+        row = await self.db.fetchrow("SELECT * FROM ng_workshop WHERE country_code=$1", (code,))
+        if not row:
+            await self.db.execute(
+                "INSERT INTO ng_workshop (country_code, level, tech_level) VALUES ($1,1,0)",
+                (code,),
+            )
+            row = await self.db.fetchrow("SELECT * FROM ng_workshop WHERE country_code=$1", (code,))
+        return row
+
+    def _workshop_upgrade_cost(self, level: int) -> float:
+        # steep curve: base * level^2.2
+        return float(self.WS_UPGRADE_BASE) * (float(level) ** 2.2)
+
+    async def workshop_status(self, code: str) -> str:
+        await self.complete_due_jobs(code)
+        ws = await self.ensure_workshop(code)
+        c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
+        jobs = await self.db.fetch(
+            "SELECT * FROM ng_workshop_jobs WHERE country_code=$1 AND status='running' ORDER BY id",
+            (code,),
+        )
+        level = int(ws["level"])
+        tech = int(ws["tech_level"])
+        next_cost = self._workshop_upgrade_cost(level)
+        lines = [
+            "🏭 کارگاه ملی",
+            f"سطح کارگاه: {level}/{self.WS_MAX_LEVEL}",
+            f"سطح فناوری صلح‌آمیز: {tech}",
+            f"هزینه ارتقا بعدی: {int(next_cost):,}",
+            f"NPT: {'عضو' if int(c['npt_member']) else 'غیرعضو'}",
+            "",
+        ]
+        if jobs:
+            lines.append("⏳ عملیات در حال انجام:")
+            for j in jobs:
+                lines.append(
+                    f"• {j['job_type']} تا {j['finishes_at']} | مقدار {int(float(j['amount']))}"
+                )
+        else:
+            lines.append("عملیات فعالی ندارید.")
+        inv_u = await self.db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='res_uranium'",
+            (code,),
+        )
+        lines.append(f"\n📦 اورانیوم انبار: {int(float((inv_u or {}).get('quantity') or 0))} واحد")
+        return "\n".join(lines)
+
+    async def workshop_upgrade(self, code: str, pid: int) -> str:
+        async with self.db.transaction() as tx:
+            ws = await tx.fetchrow("SELECT * FROM ng_workshop WHERE country_code=$1", (code,))
+            if not ws:
+                await tx.execute(
+                    "INSERT INTO ng_workshop (country_code, level, tech_level) VALUES ($1,1,0)",
+                    (code,),
+                )
+                level = 1
+            else:
+                level = int(ws["level"])
+            if level >= self.WS_MAX_LEVEL:
+                raise GameError("کارگاه به حداکثر سطح رسیده است.")
+            cost = self._workshop_upgrade_cost(level)
+            c = await tx.fetchrow(
+                "SELECT treasury FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
+                (code, pid),
+            )
+            if not c:
+                raise GameError("مالکیت معتبر نیست.")
+            if float(c["treasury"]) < cost:
+                raise GameError("موجودی خزانه برای ارتقا کافی نیست.")
+            now = datetime.now(timezone.utc).isoformat()
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (float(c["treasury"]) - cost, code),
+            )
+            await tx.execute(
+                "UPDATE ng_workshop SET level=$1, upgraded_at=$2 WHERE country_code=$3",
+                (level + 1, now, code),
+            )
+        await self.log_activity("workshop", f"ارتقای کارگاه به سطح {level+1}", code, pid)
+        await self.admin_log(pid, "workshop_upgrade", f"{code}->{level+1}")
+        return f"✅ کارگاه به سطح {level+1} ارتقا یافت.\nهزینه: {int(cost):,}"
+
+    async def _has_item(self, tx_or_db, code: str, item: str, min_q: float = 1) -> bool:
+        inv = await tx_or_db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+            (code, item),
+        )
+        return bool(inv and float(inv["quantity"]) >= min_q)
+
+    async def start_uranium_job(self, code: str, pid: int) -> str:
+        """Peaceful uranium feedstock production — requires refinery."""
+        await self.complete_due_jobs(code)
+        async with self.db.transaction() as tx:
+            # only one uranium job at a time
+            running = await tx.fetchrow(
+                "SELECT id FROM ng_workshop_jobs WHERE country_code=$1 AND job_type='uranium' AND status='running'",
+                (code,),
+            )
+            if running:
+                raise GameError("یک عملیات تولید اورانیوم در حال اجرا است.")
+            if not await self._has_item(tx, code, "b_refinery", 1):
+                # also accept building table
+                b = await tx.fetchrow(
+                    "SELECT id FROM ng_buildings WHERE country_code=$1 AND building_code='b_refinery' AND active=1",
+                    (code,),
+                )
+                inv = await tx.fetchrow(
+                    "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='b_refinery'",
+                    (code,),
+                )
+                if not b and not (inv and float(inv["quantity"]) >= 1):
+                    raise GameError("برای تولید اورانیوم به پالایشگاه نیاز دارید.")
+            ws = await tx.fetchrow("SELECT * FROM ng_workshop WHERE country_code=$1", (code,))
+            if not ws:
+                await tx.execute(
+                    "INSERT INTO ng_workshop (country_code, level, tech_level) VALUES ($1,1,0)", (code,)
+                )
+                level = 1
+            else:
+                level = int(ws["level"])
+            cost = self.WS_URANIUM_BASE_COST / (1 + 0.08 * (level - 1))
+            amount = self.WS_URANIUM_BASE_AMOUNT * (1 + 0.15 * (level - 1))
+            minutes = max(5, self.WS_URANIUM_BASE_MINUTES / (1 + 0.1 * (level - 1)))
+            c = await tx.fetchrow(
+                "SELECT treasury FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
+                (code, pid),
+            )
+            if not c or float(c["treasury"]) < cost:
+                raise GameError("موجودی خزانه برای شروع تولید کافی نیست.")
+            now = datetime.now(timezone.utc)
+            fin = now + timedelta(minutes=minutes)
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (float(c["treasury"]) - cost, code),
+            )
+            nid = await tx.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_workshop_jobs")
+            await tx.execute(
+                """
+                INSERT INTO ng_workshop_jobs (id, country_code, job_type, started_at, finishes_at, cost, amount, status)
+                VALUES ($1,$2,'uranium',$3,$4,$5,$6,'running')
+                """,
+                (int(nid["id"]), code, now.isoformat(), fin.isoformat(), cost, amount),
+            )
+        await self.log_activity("workshop", f"شروع تولید اورانیوم ×{amount:.0f}", code, pid)
+        return (
+            f"✅ تولید اورانیوم شروع شد\n"
+            f"هزینه: {int(cost):,}\nمقدار: {amount:.0f} واحد\nمدت تقریبی: {minutes:.0f} دقیقه"
+        )
+
+    async def start_research_job(self, code: str, pid: int) -> str:
+        await self.complete_due_jobs(code)
+        async with self.db.transaction() as tx:
+            running = await tx.fetchrow(
+                "SELECT id FROM ng_workshop_jobs WHERE country_code=$1 AND job_type='research' AND status='running'",
+                (code,),
+            )
+            if running:
+                raise GameError("یک پروژه تحقیقاتی در حال اجرا است.")
+            inv = await tx.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='sp_scientist'",
+                (code,),
+            )
+            if not inv or float(inv["quantity"]) < 1:
+                raise GameError("برای توسعه فناوری به متخصص هسته‌ای (دانشمند) نیاز دارید.")
+            ws = await tx.fetchrow("SELECT * FROM ng_workshop WHERE country_code=$1", (code,))
+            if not ws:
+                await tx.execute(
+                    "INSERT INTO ng_workshop (country_code, level, tech_level) VALUES ($1,1,0)", (code,)
+                )
+                level, tech = 1, 0
+            else:
+                level, tech = int(ws["level"]), int(ws["tech_level"])
+            c = await tx.fetchrow(
+                "SELECT treasury, npt_member FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
+                (code, pid),
+            )
+            if not c:
+                raise GameError("مالکیت معتبر نیست.")
+            # NPT members can research peaceful tech but slower/cheaper energy path
+            npt = int(c["npt_member"] or 0) == 1
+            cost = self.WS_RESEARCH_BASE_COST * (1 + 0.2 * tech) / (1 + 0.05 * (level - 1))
+            if npt:
+                cost *= 0.9
+            points = self.WS_RESEARCH_BASE_POINTS * (1 + 0.1 * (level - 1))
+            minutes = max(5, self.WS_RESEARCH_BASE_MINUTES * (1 + 0.15 * tech) / (1 + 0.08 * (level - 1)))
+            if float(c["treasury"]) < cost:
+                raise GameError("موجودی خزانه کافی نیست.")
+            now = datetime.now(timezone.utc)
+            fin = now + timedelta(minutes=minutes)
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (float(c["treasury"]) - cost, code),
+            )
+            nid = await tx.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_workshop_jobs")
+            await tx.execute(
+                """
+                INSERT INTO ng_workshop_jobs (id, country_code, job_type, started_at, finishes_at, cost, amount, status)
+                VALUES ($1,$2,'research',$3,$4,$5,$6,'running')
+                """,
+                (int(nid["id"]), code, now.isoformat(), fin.isoformat(), cost, points),
+            )
+        await self.log_activity("workshop", f"شروع تحقیق فناوری سطح+{points:.0f}", code, pid)
+        return (
+            f"✅ تحقیق فناوری صلح‌آمیز شروع شد\n"
+            f"هزینه: {int(cost):,}\nپیشرفت: +{points:.0f} سطح\nمدت: {minutes:.0f} دقیقه"
+        )
+
+    async def complete_due_jobs(self, code: str | None = None) -> int:
+        """Finish jobs whose time has passed; idempotent."""
+        now = datetime.now(timezone.utc)
+        if code:
+            jobs = await self.db.fetch(
+                "SELECT * FROM ng_workshop_jobs WHERE status='running' AND country_code=$1",
+                (code,),
+            )
+        else:
+            jobs = await self.db.fetch(
+                "SELECT * FROM ng_workshop_jobs WHERE status='running'"
+            )
+        n = 0
+        for j in jobs:
+            try:
+                fin = datetime.fromisoformat(str(j["finishes_at"]).replace("Z", "+00:00"))
+                if fin.tzinfo is None:
+                    fin = fin.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if now < fin:
+                continue
+            async with self.db.transaction() as tx:
+                still = await tx.fetchrow(
+                    "SELECT * FROM ng_workshop_jobs WHERE id=$1 AND status='running'",
+                    (j["id"],),
+                )
+                if not still:
+                    continue
+                cc = still["country_code"]
+                if still["job_type"] == "uranium":
+                    inv = await tx.fetchrow(
+                        "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='res_uranium'",
+                        (cc,),
+                    )
+                    q = float(still["amount"])
+                    if inv:
+                        await tx.execute(
+                            "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='res_uranium'",
+                            (float(inv["quantity"]) + q, cc),
+                        )
+                    else:
+                        await tx.execute(
+                            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,'res_uranium',$2)",
+                            (cc, q),
+                        )
+                elif still["job_type"] == "research":
+                    ws = await tx.fetchrow("SELECT tech_level FROM ng_workshop WHERE country_code=$1", (cc,))
+                    if not ws:
+                        await tx.execute(
+                            "INSERT INTO ng_workshop (country_code, level, tech_level) VALUES ($1,1,$2)",
+                            (cc, int(float(still["amount"]))),
+                        )
+                    else:
+                        await tx.execute(
+                            "UPDATE ng_workshop SET tech_level=$1 WHERE country_code=$2",
+                            (int(ws["tech_level"]) + int(float(still["amount"])), cc),
+                        )
+                await tx.execute(
+                    "UPDATE ng_workshop_jobs SET status='done' WHERE id=$1 AND status='running'",
+                    (j["id"],),
+                )
+            n += 1
+            await self.log_activity("workshop", f"اتمام {j['job_type']} مقدار {j['amount']}", j["country_code"])
+        return n
+
+    async def request_npt_change(self, code: str, pid: int, request_type: str) -> str:
+        if request_type not in ("join", "leave"):
+            raise GameError("نوع درخواست نامعتبر")
+        c = await self.db.fetchrow(
+            "SELECT * FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
+            (code, pid),
+        )
+        if not c:
+            raise GameError("مالکیت معتبر نیست.")
+        is_member = int(c["npt_member"] or 0) == 1
+        if request_type == "join" and is_member:
+            raise GameError("کشور هم‌اکنون عضو NPT است.")
+        if request_type == "leave" and not is_member:
+            raise GameError("کشور عضو NPT نیست.")
+        pending = await self.db.fetchrow(
+            "SELECT id FROM ng_npt_requests WHERE country_code=$1 AND status='pending'",
+            (code,),
+        )
+        if pending:
+            raise GameError("یک درخواست NPT در انتظار بررسی دارید.")
+        now = datetime.now(timezone.utc).isoformat()
+        nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_npt_requests")
+        rid = int(nid["id"])
+        await self.db.execute(
+            """
+            INSERT INTO ng_npt_requests (id, country_code, player_id, request_type, status, created_at)
+            VALUES ($1,$2,$3,$4,'pending',$5)
+            """,
+            (rid, code, pid, request_type, now),
+        )
+        label = "عضویت در NPT" if request_type == "join" else "خروج از NPT"
+        body = (
+            f"کشور {c['name_fa']} درخواست {label} را ارسال کرده است.\n\n"
+            f"شناسه بازیکن: {pid}\nزمان: {now}"
+        )
+        await self._owner_inbox("npt", rid, f"درخواست NPT — {c['name_fa']}", body)
+        await self.log_activity("npt", f"درخواست {label}", code, pid)
+        return f"✅ درخواست «{label}» برای بررسی مالک ارسال شد."
+
+    async def review_npt(self, request_id: int, approve: bool, actor: int) -> str:
+        if not self.is_owner(actor):
+            raise GameError("فقط مالک می‌تواند تصمیم بگیرد.")
+        async with self.db.transaction() as tx:
+            r = await tx.fetchrow(
+                "SELECT * FROM ng_npt_requests WHERE id=$1 AND status='pending'", (request_id,)
+            )
+            if not r:
+                raise GameError("درخواست یافت نشد یا قبلاً بررسی شده است.")
+            now = datetime.now(timezone.utc).isoformat()
+            status = "approved" if approve else "rejected"
+            await tx.execute(
+                "UPDATE ng_npt_requests SET status=$1, reviewed_at=$2, reviewer_id=$3 WHERE id=$4 AND status='pending'",
+                (status, now, actor, request_id),
+            )
+            if approve:
+                new_val = 1 if r["request_type"] == "join" else 0
+                await tx.execute(
+                    "UPDATE ng_countries SET npt_member=$1 WHERE country_code=$2",
+                    (new_val, r["country_code"]),
+                )
+        label = "عضویت" if r["request_type"] == "join" else "خروج"
+        if approve:
+            await self.log_activity("npt", f"تأیید {label} NPT", r["country_code"], actor)
+            await self.admin_log(actor, "npt_approve", f"{r['country_code']} {label}")
+            await self.broadcast_log("admin", f"⚖ وضعیت NPT کشور {r['country_code']} تغییر کرد ({label}).")
+            return f"✅ درخواست {label} NPT برای {r['country_code']} تأیید شد."
+        await self.admin_log(actor, "npt_reject", f"{r['country_code']} {label}")
+        return f"درخواست {label} NPT رد شد. وضعیت قبلی حفظ شد."
+
+    async def _owner_inbox(self, kind: str, ref_id: int, title: str, body: str) -> None:
+        nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_owner_inbox")
+        await self.db.execute(
+            """
+            INSERT INTO ng_owner_inbox (id, kind, ref_id, title, body, created_at, delivered)
+            VALUES ($1,$2,$3,$4,$5,$6,0)
+            """,
+            (
+                int(nid["id"]),
+                kind,
+                ref_id,
+                title,
+                body,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+    async def pop_owner_inbox(self, limit: int = 10) -> list[dict]:
+        rows = await self.db.fetch(
+            "SELECT * FROM ng_owner_inbox WHERE delivered=0 ORDER BY id ASC"
+        )
+        rows = rows[:limit]
+        for r in rows:
+            await self.db.execute(
+                "UPDATE ng_owner_inbox SET delivered=1 WHERE id=$1", (r["id"],)
+            )
+        return rows
+
+    async def pending_npt_list(self) -> list[dict]:
+        return await self.db.fetch(
+            "SELECT * FROM ng_npt_requests WHERE status='pending' ORDER BY id DESC"
+        )
+
+    async def pending_statements_list(self) -> list[dict]:
+        return await self.db.fetch(
+            "SELECT * FROM ng_statements WHERE status='pending' ORDER BY id DESC"
+        )
+
