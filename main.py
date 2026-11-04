@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
 from config.settings import load_settings
@@ -12,6 +13,7 @@ from engine.country_engine import CountryEngine
 from engine.event_engine import EventEngine
 from engine.economy_engine import EconomyEngine
 from engine.ai_engine import AIEngine
+from engine.world_ticker import WorldTicker
 from modules.players.service import PlayerService
 from modules.countries.seed import seed_countries
 from modules.countries.management import CountryManagement
@@ -33,6 +35,7 @@ async def async_main() -> None:
         log.info("OWNER_ID configured: %s", settings.owner_id)
 
     db = await create_database(settings)
+    ticker = None
     try:
         if not await db.health_check():
             raise RuntimeError("Database health check failed")
@@ -54,6 +57,9 @@ async def async_main() -> None:
         await management.ensure_schema()
         ai = AIEngine(db, world, management)
 
+        interval = int(os.getenv("WORLD_TICK_INTERVAL", "300"))
+        ticker = WorldTicker(db, world, ai, interval_seconds=interval)
+
         app_ctx = {
             "settings": settings,
             "db": db,
@@ -64,23 +70,32 @@ async def async_main() -> None:
             "economy": economy,
             "management": management,
             "ai": ai,
+            "ticker": ticker,
         }
 
         if not settings.bale_token:
             log.error(
-                "BALE_TOKEN missing. Set environment BALE_TOKEN or local config "
-                "(see config.example.py). Infrastructure check complete without bot."
+                "BALE_TOKEN missing. Set environment BALE_TOKEN or local config.py "
+                "(gitignored). Running one offline world tick then exit."
             )
+            await ticker.run_once()
             return
 
         bot = await create_bot(settings.bale_token)
         register_handlers(bot, app_ctx)
-        log.info("Starting Bale bot via async connect() (not Bot.run())...")
-        # python-bale-bot 2.5.0: Bot.run() calls asyncio.run() internally and
-        # cannot be awaited inside an already-running event loop.
+        # Verify registration against bot.events map used by 2.5.0
+        n_handlers = len(getattr(bot, "events", {}).get("on_message") or [])
+        log.info("on_message handlers attached: %s", n_handlers)
+        if n_handlers < 1:
+            raise RuntimeError("on_message handler was not registered")
+
+        ticker.start()
+        log.info("Starting Bale bot (async with + connect / single polling loop)...")
         async with bot:
             await bot.connect()
     finally:
+        if ticker:
+            await ticker.stop()
         await db.close()
         log.info("Database closed")
 
