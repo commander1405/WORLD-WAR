@@ -51,3 +51,12 @@ See `bot/`, `engine/`, `database/`, `modules/` for modular layout.
 ## License
 
 Private / project license TBD by owner.
+
+## Configuration priority
+
+1. Environment variables (`BALE_TOKEN`, `OWNER_ID`, `DATABASE_MODE`, `DATABASE_URL`, ...)
+2. Local `config.py` in project root (for Pydroid3 / manual runs)
+
+`config.example.py` shows the shape of `config.py`.
+
+Never log the bot token.

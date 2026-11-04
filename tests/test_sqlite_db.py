@@ -17,7 +17,7 @@ from engine.country_engine import CountryEngine, CountryClaimError
 
 
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 @pytest.fixture
@@ -29,6 +29,7 @@ def test_sqlite_migrate_and_health(db_path):
     async def _t():
         settings = Settings(
             bale_token="",
+            owner_id=0,
             database_mode="sqlite",
             database_url="",
             sqlite_path=db_path,
@@ -50,6 +51,7 @@ def test_country_claim_atomic(db_path):
     async def _t():
         settings = Settings(
             bale_token="",
+            owner_id=0,
             database_mode="sqlite",
             database_url="",
             sqlite_path=db_path,

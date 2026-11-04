@@ -82,3 +82,14 @@ class CountryEngine:
             "SELECT * FROM countries WHERE country_code = $1",
             (country_code.upper(),),
         )
+
+
+    async def list_countries(self) -> list[dict]:
+        return await self.db.fetch(
+            """
+            SELECT c.country_code, c.name_en, c.name_fa, c.owner_player_id, c.controlled_by,
+                   c.flag, c.population, c.stability
+            FROM countries c
+            ORDER BY c.name_en
+            """
+        )
