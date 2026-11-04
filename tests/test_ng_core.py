@@ -16,7 +16,7 @@ def run(c):
     return asyncio.run(c)
 
 
-async def boot(tmp_path, owner=1):
+async def boot(tmp_path, owner=900001):
     settings = Settings(
         bale_token="",
         owner_id=owner,
@@ -175,11 +175,11 @@ def test_workshop_upgrade_and_jobs(tmp_path):
 
     async def _t2():
         db, g = await boot(tmp_path / "w2", owner=1)
-        await g.claim(1, "US")
+        await g.claim(10, "US")
         await db.execute("UPDATE ng_countries SET treasury=500000000 WHERE country_code='US'")
         await g.admin_give_item(1, "US", "b_refinery", 1)
         await g.admin_give_item(1, "US", "sp_scientist", 1)
-        msg = await g.workshop_upgrade("US", 1)
+        msg = await g.workshop_upgrade("US", 10)
         assert "ارتق" in msg
         msg2 = await g.start_uranium_job("US", 1)
         assert "شروع" in msg2
@@ -194,7 +194,7 @@ def test_workshop_upgrade_and_jobs(tmp_path):
             "SELECT quantity FROM ng_inventory WHERE country_code='US' AND item_code='res_uranium'"
         )
         assert inv and float(inv["quantity"]) > 0
-        await g.start_research_job("US", 1)
+        await g.start_research_job("US", 10)
         await db.close()
     run(_t2())
 
@@ -278,13 +278,13 @@ def test_attack_with_forces_and_cooldown(tmp_path):
 def test_test_mode_snapshot_restore(tmp_path):
     async def _t():
         db, g = await boot(tmp_path / "testm", owner=1)
-        await g.claim(1, "US")
-        await db.execute("UPDATE ng_countries SET treasury=12345 WHERE country_code='US'")
+        # Owner is UN; bind test mode to UN country
+        await db.execute("UPDATE ng_countries SET treasury=12345 WHERE country_code='UN'")
         await g.enable_test_mode(1)
-        c = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'")
+        c = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='UN'")
         assert float(c["treasury"]) >= 999_999_999
         await g.disable_test_mode(1)
-        c2 = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'")
+        c2 = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='UN'")
         assert abs(float(c2["treasury"]) - 12345) < 1
         await db.close()
     run(_t())
@@ -305,21 +305,20 @@ def test_membership_settings(tmp_path):
 def test_craft_bomb_and_nuclear_attack(tmp_path):
     async def _t():
         db, g = await boot(tmp_path / "nuke", owner=1)
-        await g.claim(1, "US")
+        await g.claim(10, "US")
         await g.claim(2, "DE")
         await db.execute("UPDATE ng_countries SET treasury=100000000 WHERE country_code='US'")
         await db.execute(
             "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('US','res_uranium',30)"
         )
-        # enable nuclear
         await db.execute("UPDATE world_meta SET nuclear_enabled=1 WHERE id=1")
-        msg = await g.craft_atom_bomb("US", 1)
+        msg = await g.craft_atom_bomb("US", 10)
         assert "بمب" in msg
         inv = await db.fetchrow(
             "SELECT quantity FROM ng_inventory WHERE country_code='US' AND item_code='item_atom_bomb'"
         )
         assert float(inv["quantity"]) >= 1
-        report = await g.attack_nuclear("US", "DE", 1)
+        report = await g.attack_nuclear("US", "DE", 10)
         assert "اتمی" in report or "تخریب" in report
         de = await db.fetchrow("SELECT hp FROM ng_countries WHERE country_code='DE'")
         assert float(de["hp"]) < 1000

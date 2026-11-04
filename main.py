@@ -93,8 +93,8 @@ async def owner_inbox_loop(game: Game, bot, owner_id: int):
 async def async_main() -> None:
     settings = load_settings()
     logging.getLogger().setLevel(settings.log_level)
-        for name in ("httpx", "httpcore", "asyncio", "bale", "aiohttp"):
-            logging.getLogger(name).setLevel(logging.WARNING)
+    for name in ("httpx", "httpcore", "asyncio", "bale", "aiohttp"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     db = await create_database(settings)
     try:
         if not await db.health_check():
