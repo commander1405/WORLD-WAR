@@ -673,6 +673,230 @@ class Game:
                 total += ps
         return total
 
+
+    # ---- air defense & cyber ----
+    DEFENSE_COVER_CAP = 0.65  # never 100%
+    CYBER_DEF_DISABLE_RATIO = 0.30  # 30% of defense offline
+    CYBER_DEF_DURATION_SEC = 120
+    CYBER_HACK_COOLDOWN_SEC = 180  # per attacker country
+
+    async def defense_power(self, code: str) -> float:
+        inv = await self.db.fetch(
+            "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (code,)
+        )
+        total = 0.0
+        for r in inv:
+            meta = self._cat.get(r["item_code"])
+            if not meta:
+                continue
+            cat = meta["category"]
+            code_i = r["item_code"]
+            if cat == "defense" or code_i in ("m_sam_patriot", "m_sam_s400", "d_sam", "d_radar"):
+                total += float(meta.get("power_score") or 0) * float(r["quantity"])
+        return total
+
+    async def active_cyber_disable_ratio(self, code: str) -> float:
+        """Return fraction of defense currently disabled (0..1)."""
+        now = datetime.now(timezone.utc)
+        rows = await self.db.fetch(
+            "SELECT * FROM ng_cyber_effects WHERE target_country=$1 AND effect_type='def_disable'",
+            (code,),
+        )
+        best = 0.0
+        for r in rows:
+            try:
+                ends = datetime.fromisoformat(str(r["ends_at"]).replace("Z", "+00:00"))
+                if ends.tzinfo is None:
+                    ends = ends.replace(tzinfo=timezone.utc)
+                if ends > now:
+                    best = max(best, float(r.get("strength") or self.CYBER_DEF_DISABLE_RATIO))
+            except Exception:
+                continue
+        return min(0.9, best)
+
+    async def defense_coverage(self, code: str, attack_kind: str) -> tuple[float, dict]:
+        """Return (intercept_ratio 0..cap, meta for report)."""
+        raw = await self.defense_power(code)
+        # soft curve, expensive to max out
+        base = raw / (raw + 120.0) * 0.72
+        base = min(self.DEFENSE_COVER_CAP, max(0.0, base))
+        # effectiveness by attack type
+        kind_factor = {"air": 1.0, "ground": 0.4, "sea": 0.25, "nuclear": 0.15}.get(attack_kind, 0.5)
+        disable = await self.active_cyber_disable_ratio(code)
+        effective = base * kind_factor * (1.0 - disable)
+        effective = min(self.DEFENSE_COVER_CAP, max(0.0, effective))
+        return effective, {
+            "defense_power": raw,
+            "base_cover": base,
+            "kind_factor": kind_factor,
+            "cyber_disable": disable,
+            "intercept": effective,
+        }
+
+    async def _consume_item(self, code: str, item: str, qty: float = 1.0) -> None:
+        row = await self.db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+            (code, item),
+        )
+        if not row or float(row["quantity"]) < qty:
+            raise GameError("آیتم موردنیاز را ندارید.")
+        left = float(row["quantity"]) - qty
+        if left <= 0:
+            await self.db.execute(
+                "DELETE FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                (code, item),
+            )
+        else:
+            await self.db.execute(
+                "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                (left, code, item),
+            )
+
+    async def hack_defense(self, attacker: str, target: str, pid: int) -> str:
+        if attacker == target:
+            raise GameError("هدف نامعتبر است")
+        if target == UN_CODE:
+            raise GameError("هدف مجاز نیست")
+        a = await self.db.fetchrow(
+            "SELECT * FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
+            (attacker, pid),
+        )
+        if not a:
+            raise GameError("کشور شما یافت نشد")
+        t = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (target,))
+        if not t or int(t.get("is_destroyed") or 0):
+            raise GameError("هدف معتبر نیست")
+        # cooldown: no overlapping active effect from same source, and global cooldown
+        now = datetime.now(timezone.utc)
+        active = await self.db.fetch(
+            "SELECT * FROM ng_cyber_effects WHERE source_country=$1 AND effect_type='def_disable'",
+            (attacker,),
+        )
+        for r in active:
+            try:
+                ends = datetime.fromisoformat(str(r["ends_at"]).replace("Z", "+00:00"))
+                if ends.tzinfo is None:
+                    ends = ends.replace(tzinfo=timezone.utc)
+                if ends > now:
+                    raise GameError("هنوز یک عملیات هکر پدافند فعال دارید. صبر کنید تا تمام شود.")
+                starts = datetime.fromisoformat(str(r["starts_at"]).replace("Z", "+00:00"))
+                if starts.tzinfo is None:
+                    starts = starts.replace(tzinfo=timezone.utc)
+                if (now - starts).total_seconds() < self.CYBER_HACK_COOLDOWN_SEC:
+                    left = int(self.CYBER_HACK_COOLDOWN_SEC - (now - starts).total_seconds())
+                    raise GameError(f"محدودیت استفاده از هکر پدافند: {left} ثانیه.")
+            except GameError:
+                raise
+            except Exception:
+                pass
+        await self._consume_item(attacker, "cyber_hack_def", 1)
+        ends = now + timedelta(seconds=self.CYBER_DEF_DURATION_SEC)
+        nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_cyber_effects")
+        await self.db.execute(
+            """
+            INSERT INTO ng_cyber_effects
+            (id, target_country, effect_type, source_country, actor_id, strength, starts_at, ends_at, created_at)
+            VALUES ($1,$2,'def_disable',$3,$4,$5,$6,$7,$6)
+            """,
+            (
+                int(nid["id"]), target, attacker, pid, self.CYBER_DEF_DISABLE_RATIO,
+                now.isoformat(), ends.isoformat(),
+            ),
+        )
+        tname = await self.country_label(target)
+        msg = (
+            f"🛡 عملیات هکر پدافند موفق بود.\n"
+            f"هدف: {tname}\n"
+            f"اثر: ۳۰٪ ظرفیت پدافند هدف به مدت ۲ دقیقه مختل شد.\n"
+            f"پایان اثر: {ends.astimezone(TEHRAN).strftime('%H:%M:%S')} (تهران)\n"
+            f"۱ عدد «هکر پدافند» مصرف شد."
+        )
+        await self.log_activity("cyber", f"هکر پدافند روی {target}", attacker, pid)
+        await self.broadcast_log("admin", f"💻 اختلال پدافند موقت روی {tname}")
+        return msg
+
+    async def hack_assets(self, attacker: str, target: str, pid: int) -> str:
+        if attacker == target:
+            raise GameError("هدف نامعتبر است")
+        if target == UN_CODE:
+            raise GameError("هدف مجاز نیست")
+        a = await self.db.fetchrow(
+            "SELECT * FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
+            (attacker, pid),
+        )
+        if not a:
+            raise GameError("کشور شما یافت نشد")
+        t = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (target,))
+        if not t or int(t.get("is_destroyed") or 0):
+            raise GameError("هدف معتبر نیست")
+        await self._consume_item(attacker, "cyber_hack_asset", 1)
+        inv = await self.db.fetch(
+            "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0 ORDER BY item_code",
+            (target,),
+        )
+        mil = 0
+        eco = []
+        lines = []
+        for r in inv:
+            meta = self._cat.get(r["item_code"], {})
+            name = meta.get("name_fa", r["item_code"])
+            q = float(r["quantity"])
+            cat = meta.get("category", "")
+            if cat in ("ground", "air", "sea", "missile", "defense"):
+                mil += q
+                lines.append(f"• {name}: {int(q)}")
+            elif cat in ("mine", "infra", "nuclear", "specialist") or meta.get("is_building"):
+                eco.append(f"• {name}: {int(q)}")
+        tname = await self.country_label(target)
+        text = (
+            f"💰 گزارش هکر دارایی — {tname}\n\n"
+            f"خزانه: {int(float(t['treasury'])):,} {t.get('currency_name_fa') or ''}\n"
+            f"سلامت: {int(float(t['hp']))}/{int(float(t['max_hp']))}\n"
+            f"NPT: {'عضو' if int(t.get('npt_member') or 0) else 'غیرعضو'}\n"
+            f"درآمد روزانه ثبت‌شده: {int(float(t.get('daily_income') or 0)):,}\n"
+            f"هزینه روزانه ثبت‌شده: {int(float(t.get('daily_expense') or 0)):,}\n\n"
+            f"تعداد کل واحدهای نظامی در انبار: {int(mil)}\n"
+        )
+        if lines:
+            text += "تجهیزات نظامی:\n" + "\n".join(lines[:25])
+            if len(lines) > 25:
+                text += f"\n… و {len(lines)-25} مورد دیگر"
+        if eco:
+            text += "\n\nدارایی‌های اقتصادی:\n" + "\n".join(eco[:15])
+        text += "\n\n۱ عدد «هکر دارایی» مصرف شد. هیچ تغییری در دارایی هدف اعمال نشد."
+        await self.log_activity("cyber", f"هکر دارایی روی {target}", attacker, pid)
+        return text
+
+    async def cyber_status_text(self, code: str) -> str:
+        dis = await self.active_cyber_disable_ratio(code)
+        cov, meta = await self.defense_coverage(code, "air")
+        lines = [
+            "💻 وضعیت پدافند و سایبری",
+            f"قدرت پدافند خام: {meta['defense_power']:.0f}",
+            f"پوشش هوایی مؤثر: {cov*100:.1f}% (سقف {self.DEFENSE_COVER_CAP*100:.0f}%)",
+        ]
+        if dis > 0:
+            lines.append(f"⚠ اختلال سایبری فعال: {dis*100:.0f}% ظرفیت پدافند موقتاً از کار افتاده")
+            rows = await self.db.fetch(
+                "SELECT * FROM ng_cyber_effects WHERE target_country=$1 AND effect_type='def_disable' ORDER BY ends_at DESC",
+                (code,),
+            )
+            now = datetime.now(timezone.utc)
+            for r in rows[:3]:
+                try:
+                    ends = datetime.fromisoformat(str(r["ends_at"]).replace("Z", "+00:00"))
+                    if ends.tzinfo is None:
+                        ends = ends.replace(tzinfo=timezone.utc)
+                    if ends > now:
+                        left = int((ends - now).total_seconds())
+                        lines.append(f"زمان باقی‌مانده اختلال: {left} ثانیه")
+                except Exception:
+                    pass
+        else:
+            lines.append("اختلال سایبری فعال نیست.")
+        return "\n".join(lines)
+
+
     async def available_force(self, code: str, kind: str) -> tuple[float, list]:
         """Return (total_power, units[{item, qty, power}]) for free (non-zero) inventory."""
         inv = await self.db.fetch(
@@ -736,6 +960,8 @@ class Game:
             raise GameError("نوع درگیری نامعتبر است.")
         percent = max(10, min(100, float(percent)))
         test_atk = await self.is_test_active_for_country(attacker)
+        cover = 0.0
+        intercepted = 0.0
 
         async with self.db.transaction() as tx:
             a = await tx.fetchrow(
@@ -822,6 +1048,10 @@ class Game:
                 raise GameError("نیروی اعزامی صفر است.")
             raw = (ap - dp * 0.55) * 0.35 + 15
             damage = max(5.0, min(200.0, raw))
+            # air defense interception (never 100%)
+            cover, def_meta = await self.defense_coverage(defender, kind)
+            intercepted = damage * cover
+            damage = max(3.0, damage - intercepted)
             victory = ap >= dp * 0.85
             result = f"پیروزی {attacker}" if victory else f"برتری دفاعی {defender}"
 
@@ -926,13 +1156,12 @@ class Game:
 
         atk_name = await self.country_label(attacker)
         def_name = await self.country_label(defender)
-        atk_name = await self.country_label(attacker)
-        def_name = await self.country_label(defender)
         report = (
             f"⚔️ گزارش درگیری\n\n"
             f"مهاجم: {atk_name}\nمدافع: {def_name}\nنوع: {kind}\nشدت: {int(percent)}٪\n"
             f"نتیجه: {result}\n"
-            f"خسارت سلامت: {int(damage)}\n"
+            f"خسارت نهایی: {int(damage)}\n"
+            f"رهگیری پدافند: {int(intercepted)} (پوشش {cover*100:.0f}٪)\n"
             f"سلامت فعلی مدافع: {int(max(0, new_hp))}\n"
             f"غنیمت نقدی: {int(loot):,}"
             + (" (غنیمتی نبود)" if loot <= 0 and victory else "")
@@ -1086,7 +1315,7 @@ class Game:
         tables = [
             "ng_cart","ng_market","ng_peace","ng_statements","ng_daily_payouts",
             "ng_activity","ng_admin_log","ng_buildings","ng_inventory","ng_players",
-            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode","ng_finance_ledger","ng_player_activity",
+            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode","ng_finance_ledger","ng_player_activity","ng_cyber_effects",
         ]
         async with self.db.transaction() as tx:
             for t in tables:
@@ -2290,6 +2519,9 @@ class Game:
             )
             pct = random.uniform(0.25, 0.35)
             damage = float(d["max_hp"]) * pct
+            cover, _ = await self.defense_coverage(defender, "nuclear")
+            intercepted = damage * cover
+            damage = max(damage * 0.5, damage - intercepted)  # nuclear still hurts a lot
             new_hp = max(0.0, float(d["hp"]) - damage)
             await tx.execute(
                 "UPDATE ng_countries SET hp=$1 WHERE country_code=$2", (new_hp, defender)

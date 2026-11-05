@@ -442,3 +442,47 @@ def test_guide_content_structure():
     assert "سؤالات" in text or "متداول" in text
     assert any("راهنما" in b[0] for row in rows for b in row)
     assert guide_menu_rows()
+
+
+def test_defense_intercept_and_cyber(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "cyber", owner=1)
+        await g.claim(10, "US")
+        await g.claim(11, "DE")
+        await db.execute("UPDATE ng_countries SET treasury=50000000 WHERE country_code IN ('US','DE')")
+        # give US ground force and DE strong SAM
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('US','g_inf',20)"
+        )
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('DE','m_sam_s400',10)"
+        )
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('DE','d_radar',10)"
+        )
+        await db.execute("UPDATE world_meta SET war_enabled=1 WHERE id=1")
+        cov, meta = await g.defense_coverage("DE", "air")
+        assert 0 < cov <= g.DEFENSE_COVER_CAP
+        # cyber hack needs item
+        try:
+            await g.hack_defense("US", "DE", 10)
+            assert False, "should need item"
+        except GameError:
+            pass
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('US','cyber_hack_def',2)"
+        )
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('US','cyber_hack_asset',1)"
+        )
+        msg = await g.hack_defense("US", "DE", 10)
+        assert "پدافند" in msg
+        dis = await g.active_cyber_disable_ratio("DE")
+        assert dis >= 0.29
+        report = await g.hack_assets("US", "DE", 10)
+        assert "خزانه" in report
+        # attack should include intercept fields
+        rep = await g.attack("US", "DE", "ground", 50, 10)
+        assert "رهگیری" in rep or "خسارت" in rep
+        await db.close()
+    run(_t())

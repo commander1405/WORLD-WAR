@@ -68,6 +68,8 @@ CATALOG = [
     {"item_code":"sp_scientist","category":"specialist","name_fa":"دانشمند","name_en":"Scientist","origin_fa":"عمومی","description_fa":"افزایش جزئی درآمد تحقیق","unit_price":1_500_000,"max_per_order":10,"power_score":0,"daily_income":5_000,"maintenance":2000,"is_building":0},
     {"item_code":"res_uranium_90","category":"nuclear","name_fa":"اورانیوم ۹۰٪","name_en":"Uranium 90%","origin_fa":"عمومی","description_fa":"ماده بازی برای ساخت بمب اتم انتزاعی","unit_price":20_000_000,"max_per_order":20,"power_score":0,"daily_income":0,"maintenance":0,"is_building":0},
     {"item_code":"item_atom_bomb","category":"nuclear","name_fa":"بمب اتم (بازی)","name_en":"Game Atom Bomb","origin_fa":"عمومی","description_fa":"تجهیز انتزاعی حمله هسته‌ای بازی","unit_price":50_000_000,"max_per_order":5,"power_score":0,"daily_income":0,"maintenance":0,"is_building":0},
+    {"item_code":"cyber_hack_def","category":"cyber","name_fa":"هکر پدافند","name_en":"Defense Hacker","origin_fa":"عمومی","description_fa":"اختلال موقت ۳۰٪ در ظرفیت پدافند هدف به مدت ۲ دقیقه","unit_price":8_000_000,"max_per_order":5,"power_score":0,"daily_income":0,"maintenance":0,"is_building":0},
+    {"item_code":"cyber_hack_asset","category":"cyber","name_fa":"هکر دارایی","name_en":"Asset Hacker","origin_fa":"عمومی","description_fa":"شناسایی اطلاعات اقتصادی و نظامی کشور هدف بدون تغییر دارایی","unit_price":5_000_000,"max_per_order":8,"power_score":0,"daily_income":0,"maintenance":0,"is_building":0},
     {"item_code":"res_uranium","category":"mine","name_fa":"اورانیوم (واحد بازی)","name_en":"Uranium Unit","origin_fa":"عمومی","description_fa":"منبع صلح‌آمیز کارگاه","unit_price":50_000,"max_per_order":100,"power_score":0,"daily_income":0,"maintenance":0,"is_building":0},
 ]
 
@@ -81,4 +83,5 @@ CAT_FA = {
     "infra": "زیرساخت صنعتی",
     "nuclear": "فناوری هسته‌ای صلح‌آمیز",
     "specialist": "متخصصان",
+    "cyber": "هک و امنیت",
 }

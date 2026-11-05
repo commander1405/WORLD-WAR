@@ -534,14 +534,13 @@ def register_handlers(bot, app_ctx: dict):
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
                     return
-                ok, reason = await game.can_attack(code)
-                if not ok:
-                    await reply(message, f"❌ {reason}", main_kb(owner))
-                    return
-                countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
-                rows = [[(f"{c['flag']} {c['name_fa']}", f"ng:atk:{c['country_code']}")] for c in countries]
-                rows.append(back_row())
-                await reply(message, "⚔️ هدف عملیات:", ik(rows) if countries else main_kb(owner))
+                rows = [
+                    [("⚔️ حمله نظامی", "ng:atkmenu")],
+                    [("💻 هک و امنیت", "ng:cyber")],
+                    [("🛡 وضعیت پدافند من", "ng:mydef")],
+                    back_row(),
+                ]
+                await reply(message, "⚔️ عملیات نظامی و سایبری:", ik(rows))
                 return
 
             if text == BTN_STMT:
@@ -932,6 +931,69 @@ def register_handlers(bot, app_ctx: dict):
                     await out(f"❌ {e}")
                 return
 
+
+            if data == "ng:atkmenu":
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                ok, reason = await game.can_attack(code)
+                if not ok:
+                    await out(f"❌ {reason}")
+                    return
+                countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
+                rows = [[(f"{c['flag']} {c['name_fa']}", f"ng:atk:{c['country_code']}")] for c in countries]
+                rows.append(back_row())
+                await out("⚔️ هدف حمله نظامی:", ik(rows) if countries else main_kb(owner))
+                return
+            if data == "ng:cyber":
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
+                rows = [[(f"{c['flag']} {c['name_fa']}", f"ng:cybertgt:{c['country_code']}")] for c in countries]
+                rows.append(back_row())
+                await out("💻 کشور هدف عملیات سایبری:", ik(rows) if countries else main_kb(owner))
+                return
+            if data.startswith("ng:cybertgt:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                tgt = data.split(":")[-1]
+                label = await game.country_label(tgt)
+                rows = [
+                    [("🛡 هکر پدافند", f"ng:cyberdef:{tgt}")],
+                    [("💰 هکر دارایی", f"ng:cyberasset:{tgt}")],
+                    back_row(),
+                ]
+                await out(f"💻 عملیات سایبری علیه {label}:", ik(rows))
+                return
+            if data.startswith("ng:cyberdef:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                tgt = data.split(":")[-1]
+                try:
+                    await out(await game.hack_defense(code, tgt, pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:cyberasset:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                tgt = data.split(":")[-1]
+                try:
+                    await out(await game.hack_assets(code, tgt, pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:mydef":
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                await out(await game.cyber_status_text(code))
+                return
+
             # attack
             if data.startswith("ng:atk:"):
                 if not code:
@@ -959,7 +1021,8 @@ def register_handlers(bot, app_ctx: dict):
                     await out("❌ هیچ نیروی قابل‌استفاده‌ای برای انواع حمله ندارید.")
                     return
                 rows.append(back_row())
-                await out(f"عملیات علیه {dst} — فقط انواع دارای نیرو:", ik(rows))
+                dst_name = await game.country_label(dst)
+                await out(f"عملیات علیه {dst_name} — فقط انواع دارای نیرو:", ik(rows))
                 return
             if data.startswith("ng:fight:"):
                 if not code:
