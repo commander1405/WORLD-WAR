@@ -1668,6 +1668,112 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
 
+
+            # ---- Double HP (owner only) ----
+            if data == "ng:odblhp":
+                countries = await game.list_countries()
+                owned = [c for c in countries if c.get("owner_player_id")]
+                if not owned:
+                    await out("هیچ کشور دارای مالکی نیست.", main_kb(owner))
+                    return
+                rows = []
+                for c in owned[:35]:
+                    try:
+                        on = int(c.get("double_hp") or 0) == 1
+                    except Exception:
+                        on = False
+                    mark = "✅×۲" if on else "—"
+                    rows.append([(
+                        f"{mark} {c.get('flag') or ''} {c['name_fa']}".strip(),
+                        f"ng:odbl:{c['country_code']}",
+                    )])
+                rows.append(back_row())
+                await out("🧬 جان ۲ برابر\nکشور را انتخاب کنید:", ik(rows))
+                return
+
+            if data.startswith("ng:odbl:") and data.count(":") == 2 and not data.startswith("ng:odblon") and not data.startswith("ng:odbloff"):
+                code = data.split(":")[-1]
+                c = await game.db.fetchrow(
+                    "SELECT * FROM ng_countries WHERE country_code=$1", (code,)
+                )
+                if not c:
+                    await out("کشور یافت نشد")
+                    return
+                on = int(c.get("double_hp") or 0) == 1
+                st = "فعال ✅" if on else "غیرفعال"
+                rows = [
+                    [
+                        ("✅ فعال کردن ×۲", f"ng:odblon:{code}"),
+                        ("❌ خاموش کردن", f"ng:odbloff:{code}"),
+                    ],
+                    back_row(),
+                ]
+                await out(
+                    f"{c.get('flag') or ''} {c['name_fa']}\n"
+                    f"جان ۲ برابر: {st}\n"
+                    f"سلامت: {int(float(c['hp']))}/{int(float(c['max_hp']))}",
+                    ik(rows),
+                )
+                return
+
+            if data.startswith("ng:odblon:"):
+                code = data.split(":")[-1]
+                try:
+                    await out(await game.set_double_hp(pid, code, True))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                except Exception:
+                    log.exception("double_hp on")
+                    await out("❌ خطا در فعال‌سازی جان ۲ برابر")
+                return
+
+            if data.startswith("ng:odbloff:"):
+                code = data.split(":")[-1]
+                try:
+                    await out(await game.set_double_hp(pid, code, False))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                except Exception:
+                    log.exception("double_hp off")
+                    await out("❌ خطا در خاموش کردن جان ۲ برابر")
+                return
+
+            if data.startswith("ng:oudblon:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow(
+                    "SELECT country_code FROM ng_players WHERE player_id=$1", (tid,)
+                )
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("این کاربر کشور ندارد.")
+                    return
+                try:
+                    await out(await game.set_double_hp(pid, code, True))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                except Exception:
+                    log.exception("oudbl on")
+                    await out("❌ خطا در فعال‌سازی جان ۲ برابر")
+                return
+
+            if data.startswith("ng:oudbloff:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow(
+                    "SELECT country_code FROM ng_players WHERE player_id=$1", (tid,)
+                )
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("این کاربر کشور ندارد.")
+                    return
+                try:
+                    await out(await game.set_double_hp(pid, code, False))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                except Exception:
+                    log.exception("oudbl off")
+                    await out("❌ خطا در خاموش کردن جان ۲ برابر")
+                return
+
             if data.startswith("ng:ou:"):
                 tid = int(data.split(":")[-1])
                 try:

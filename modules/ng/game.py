@@ -2981,10 +2981,20 @@ class Game:
     async def set_double_hp(self, actor: int, code: str, enabled: bool) -> str:
         if not self.is_owner(actor):
             raise GameError("فقط مالک")
+        # ensure column exists (SQLite/Postgres)
+        try:
+            await self.db.execute(
+                "ALTER TABLE ng_countries ADD COLUMN double_hp INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
         c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
         if not c:
             raise GameError("کشور یافت نشد")
-        cur = int(c.get("double_hp") or 0) == 1
+        try:
+            cur = int(c.get("double_hp") or 0) == 1
+        except Exception:
+            cur = False
         if enabled and cur:
             return "جان ۲ برابر از قبل فعال است."
         if not enabled and not cur:
