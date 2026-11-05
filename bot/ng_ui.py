@@ -229,6 +229,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("🧪 حساب تستی", "ng:otest"), ("⚙️ عضویت اجباری", "ng:oforce")],
                     [("بن کاربر", "ng:oban"), ("آنبن کاربر", "ng:ounban")],
                     [("تغییر پول کشور", "ng:omoney")],
+                    [("💰 گرفتن مالیات", "ng:otax"), ("⚖️ محکوم کردن کشور", "ng:ocondemn")],
                     [("🔴 ریست کامل جهان", "ng:oreset1")],
                 ]
                 await reply(message, "🛡 پنل مالک / سازمان ملل\nدستورات: /admin /owner /panel", ik(rows))
@@ -323,6 +324,60 @@ def register_handlers(bot, app_ctx: dict):
                         msg = f"❌ {e}"
                     await reply(message, msg, main_kb(owner))
                     return
+
+                if kind == "global_tax_amount":
+                    _pending.pop(pid, None)
+                    try:
+                        amount = float(text.replace(",", "").replace("،", ""))
+                        result = await game.global_tax(pid, amount)
+                        msg = (
+                            f"✅ مالیات سراسری انجام شد\n"
+                            f"مبلغ هر نفر: {int(result['amount']):,}\n"
+                            f"تعداد مشمول: {result['taxed']}\n"
+                            f"ردشده (موجودی کم): {result['skipped']}\n"
+                            f"جمع واریز به سازمان ملل: {int(result['collected']):,}"
+                        )
+                    except (ValueError, GameError) as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "user_give_money":
+                    _pending.pop(pid, None)
+                    try:
+                        amount = float(text.replace(",", "").replace("،", ""))
+                        code = st["code"]
+                        msg = await game.admin_money(pid, code, amount)
+                    except (ValueError, GameError) as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "user_take_money":
+                    _pending.pop(pid, None)
+                    try:
+                        amount = float(text.replace(",", "").replace("،", ""))
+                        msg = await game.admin_take_money(pid, st["code"], amount)
+                    except (ValueError, GameError) as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "user_tax":
+                    _pending.pop(pid, None)
+                    try:
+                        amount = float(text.replace(",", "").replace("،", ""))
+                        msg = await game.admin_tax_user(pid, st["code"], amount)
+                    except (ValueError, GameError) as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "condemn_speech":
+                    _pending.pop(pid, None)
+                    try:
+                        msg = await game.condemn_country(pid, st["code"], text)
+                    except GameError as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+
                 if kind == "edit_start":
                     _pending.pop(pid, None)
                     try:
@@ -342,6 +397,10 @@ def register_handlers(bot, app_ctx: dict):
 
             # ---- main menu ----
             if text in ("/start", "شروع", "منو", "menu"):
+                try:
+                    await game.record_start(pid)
+                except Exception:
+                    log.exception("record_start")
                 start_msg = await game.get_setting("start_message", game.DEFAULT_START)
                 await reply(message, start_msg, main_kb(owner))
                 return
@@ -573,7 +632,7 @@ def register_handlers(bot, app_ctx: dict):
                     await msg.reply(str(text)[:3500], components=kb or main_kb(owner))
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -1015,16 +1074,44 @@ def register_handlers(bot, app_ctx: dict):
                     await out(f"❌ {e}")
                 return
 
-            if data == "ng:o:players":
-                players = await game.list_players()
-                lines = ["بازیکنان"]
-                for p in players:
-                    lines.append(
-                        f"• {p.get('username') or p['player_id']} | کشور: {p.get('country_code') or '—'} | "
-                        f"{'بن' if int(p.get('is_banned') or 0) else 'فعال'}"
-                    )
-                await out("\n".join(lines))
+            if data == "ng:o:players" or data.startswith("ng:o:players:"):
+                page = 0
+                if data.startswith("ng:o:players:"):
+                    try:
+                        page = int(data.split(":")[-1])
+                    except ValueError:
+                        page = 0
+                try:
+                    stats = await game.player_stats()
+                    players, total = await game.list_players_page(page)
+                    pages = max(1, (total + game.PAGE_SIZE - 1) // game.PAGE_SIZE)
+                    lines = [
+                        "👥 کاربران",
+                        f"مجموع ثبت‌نام‌شده: {stats['total']}",
+                        f"فعال امروز (/start): {stats['active_today']}",
+                        f"صفحه {page+1}/{pages}",
+                        "",
+                    ]
+                    rows = []
+                    for p in players:
+                        cc = p.get("country_code") or "?"
+                        un = p.get("username") or p["player_id"]
+                        label = f"{un} [{cc}]"
+                        rows.append([(label[:40], f"ng:ou:{p['player_id']}")])
+                    nav = []
+                    if page > 0:
+                        nav.append(("⬅️ قبلی", f"ng:o:players:{page-1}"))
+                    if (page + 1) * game.PAGE_SIZE < total:
+                        nav.append(("بعدی ➡️", f"ng:o:players:{page+1}"))
+                    if nav:
+                        rows.append(nav)
+                    rows.append(back_row())
+                    await out("\n".join(lines), ik(rows))
+                except Exception as e:
+                    log.exception("players panel")
+                    await out(f"❌ خطا در بخش کاربران: {e}")
                 return
+
             if data == "ng:o:world":
                 await out(await game.world_status_text(for_owner=owner))
                 return
@@ -1107,6 +1194,142 @@ def register_handlers(bot, app_ctx: dict):
                 ch = next((c for c in chats if int(c["id"]) == cid), None)
                 if ch:
                     await out(f"لینک عضویت:\n{ch.get('invite_link') or ch['chat_id']}")
+                return
+
+
+            if data.startswith("ng:ou:"):
+                tid = int(data.split(":")[-1])
+                try:
+                    card = await game.player_admin_card(tid)
+                except GameError as e:
+                    await out(f"❌ {e}")
+                    return
+                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                code = (p or {}).get("country_code") or ""
+                rows = [
+                    [("🚫 بن", f"ng:ouban:{tid}"), ("✅ آن‌بن", f"ng:ouunban:{tid}")],
+                    [("📦 دارایی‌ها", f"ng:ouinv:{tid}"), ("💰 پول", f"ng:oum:{tid}")],
+                    [("NPT وضعیت", f"ng:ounpt:{tid}")],
+                    [("➕ NPT", f"ng:ounptadd:{tid}"), ("➖ NPT", f"ng:ounptdel:{tid}")],
+                    [("💵 دادن پول", f"ng:ougive:{tid}"), ("💸 گرفتن پول", f"ng:outake:{tid}")],
+                    [("🧾 مالیات از کاربر", f"ng:outax:{tid}")],
+                    [("⬅️ لیست کاربران", "ng:o:players:0")],
+                ]
+                await out(card, ik(rows))
+                return
+            if data.startswith("ng:ouban:"):
+                tid = int(data.split(":")[-1])
+                try:
+                    await out(await game.ban(pid, tid, "پنل مالک"))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:ouunban:"):
+                tid = int(data.split(":")[-1])
+                try:
+                    await out(await game.unban(pid, tid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:ouinv:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("کشور نامشخص")
+                    return
+                await out(await game.inventory_text(code))
+                return
+            if data.startswith("ng:oum:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("کشور نامشخص")
+                    return
+                c = await game.db.fetchrow("SELECT treasury, currency_name_fa FROM ng_countries WHERE country_code=$1", (code,))
+                await out(f"💰 موجودی {code}: {int(float(c['treasury'])):,} {c.get('currency_name_fa') or ''}")
+                return
+            if data.startswith("ng:ounpt:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("کشور نامشخص")
+                    return
+                c = await game.db.fetchrow("SELECT npt_member, name_fa FROM ng_countries WHERE country_code=$1", (code,))
+                st = "عضو" if int(c["npt_member"]) else "غیرعضو"
+                await out(f"NPT — {c['name_fa']}: {st}")
+                return
+            if data.startswith("ng:ounptadd:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("کشور نامشخص")
+                    return
+                try:
+                    await out(await game.admin_set_npt(pid, code, True))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:ounptdel:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("کشور نامشخص")
+                    return
+                try:
+                    await out(await game.admin_set_npt(pid, code, False))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:ougive:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("کشور نامشخص")
+                    return
+                _pending[pid] = {"kind": "user_give_money", "code": code}
+                await out("مبلغ افزودن پول را بنویسید:")
+                return
+            if data.startswith("ng:outake:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("کشور نامشخص")
+                    return
+                _pending[pid] = {"kind": "user_take_money", "code": code}
+                await out("مبلغ برداشت را بنویسید:")
+                return
+            if data.startswith("ng:outax:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                code = (p or {}).get("country_code")
+                if not code:
+                    await out("کشور نامشخص")
+                    return
+                _pending[pid] = {"kind": "user_tax", "code": code}
+                await out("مبلغ مالیات اختصاصی را بنویسید:")
+                return
+
+            if data == "ng:otax":
+                _pending[pid] = {"kind": "global_tax_amount"}
+                await out("لطفاً مبلغ مالیات را به عدد وارد کنید:\nمثال: 10000")
+                return
+            if data == "ng:ocondemn":
+                countries = [c for c in await game.list_countries(for_owner=True) if c.get("country_code") != "UN"]
+                rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:ocondemn:{c['country_code']}")] for c in countries[:30]]
+                rows.append(back_row())
+                await out("کشور هدف محکومیت را انتخاب کنید:", ik(rows))
+                return
+            if data.startswith("ng:ocondemn:"):
+                code = data.split(":")[-1]
+                _pending[pid] = {"kind": "condemn_speech", "code": code}
+                await out("لطفاً متن سخنرانی سازمان ملل را بنویسید:")
                 return
 
             if data == "ng:otest":

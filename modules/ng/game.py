@@ -1054,7 +1054,7 @@ class Game:
         tables = [
             "ng_cart","ng_market","ng_peace","ng_statements","ng_daily_payouts",
             "ng_activity","ng_admin_log","ng_buildings","ng_inventory","ng_players",
-            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode",
+            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode","ng_finance_ledger","ng_player_activity",
         ]
         async with self.db.transaction() as tx:
             for t in tables:
@@ -2277,4 +2277,243 @@ class Game:
         if new_hp <= 0:
             await self.broadcast_log("destroy", f"💥 کشور {defender} در اثر حمله اتمی نابود شد.")
         return report.replace("\\n", "\n")
+
+
+    # ---------- owner users panel ----------
+    PAGE_SIZE = 8
+
+    async def record_start(self, pid: int) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        row = await self.db.fetchrow(
+            "SELECT player_id FROM ng_player_activity WHERE player_id=$1", (pid,)
+        )
+        if row:
+            await self.db.execute(
+                "UPDATE ng_player_activity SET last_start_at=$1, start_count=start_count+1 WHERE player_id=$2",
+                (now, pid),
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO ng_player_activity (player_id, last_start_at, start_count) VALUES ($1,$2,1)",
+                (pid, now),
+            )
+
+    async def player_stats(self) -> dict:
+        total_rows = await self.db.fetch("SELECT player_id FROM ng_players")
+        total = len(total_rows)
+        today = datetime.now(TEHRAN).date().isoformat()
+        acts = await self.db.fetch("SELECT * FROM ng_player_activity")
+        active_today = 0
+        for a in acts:
+            ts = a.get("last_start_at")
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt.astimezone(TEHRAN).date().isoformat() == today:
+                    active_today += 1
+            except Exception:
+                continue
+        return {"total": total, "active_today": active_today}
+
+    async def list_players_page(self, page: int = 0) -> tuple[list[dict], int]:
+        rows = await self.db.fetch(
+            "SELECT * FROM ng_players ORDER BY player_id"
+        )
+        total = len(rows)
+        page = max(0, int(page))
+        start = page * self.PAGE_SIZE
+        return rows[start:start + self.PAGE_SIZE], total
+
+    async def player_admin_card(self, target_id: int) -> str:
+        p = await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (target_id,))
+        if not p:
+            raise GameError("بازیکن یافت نشد")
+        code = p.get("country_code")
+        c = None
+        if code:
+            c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
+        ban = "مسدود" if int(p.get("is_banned") or 0) else "آزاد"
+        npt = "—"
+        treas = 0
+        if c:
+            npt = "عضو NPT" if int(c.get("npt_member") or 0) else "غیرعضو NPT"
+            treas = float(c.get("treasury") or 0)
+        act = await self.db.fetchrow(
+            "SELECT last_start_at FROM ng_player_activity WHERE player_id=$1", (target_id,)
+        )
+        last_start = (act or {}).get("last_start_at") or "—"
+        return (
+            f"👤 مدیریت کاربر\n"
+            f"شناسه: {target_id}\n"
+            f"نام کاربری: @{p.get('username') or '—'}\n"
+            f"نام نمایشی: {p.get('display_name') or '—'}\n"
+            f"کشور: {code or 'نامشخص'}\n"
+            f"وضعیت: {ban}\n"
+            f"دلیل بن: {p.get('ban_reason') or '—'}\n"
+            f"پول: {int(treas):,}\n"
+            f"NPT: {npt}\n"
+            f"آخرین /start: {last_start}"
+        )
+
+    async def ledger_write(self, kind: str, amount: float, actor: int, from_c=None, to_c=None, reason: str = "") -> None:
+        nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_finance_ledger")
+        await self.db.execute(
+            """
+            INSERT INTO ng_finance_ledger (id, kind, from_country, to_country, amount, actor_id, reason, created_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            """,
+            (
+                int(nid["id"]), kind, from_c, to_c, float(amount), actor, reason[:200],
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+    async def admin_set_npt(self, actor: int, code: str, member: bool) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        c = await self.db.fetchrow("SELECT country_code FROM ng_countries WHERE country_code=$1", (code,))
+        if not c:
+            raise GameError("کشور یافت نشد")
+        await self.db.execute(
+            "UPDATE ng_countries SET npt_member=$1 WHERE country_code=$2",
+            (1 if member else 0, code),
+        )
+        await self.admin_log(actor, "npt_manual", f"{code}={member}")
+        return f"✅ وضعیت NPT برای {code} به {'عضو' if member else 'غیرعضو'} تغییر کرد."
+
+    async def admin_take_money(self, actor: int, code: str, amount: float, reason: str = "برداشت مالک") -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        amount = float(amount)
+        if amount <= 0:
+            raise GameError("مبلغ نامعتبر")
+        async with self.db.transaction() as tx:
+            c = await tx.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", (code,))
+            if not c:
+                raise GameError("کشور یافت نشد")
+            if float(c["treasury"]) < amount:
+                raise GameError("موجودی کافی نیست")
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (float(c["treasury"]) - amount, code),
+            )
+        await self.ledger_write("admin_take", amount, actor, from_c=code, reason=reason)
+        await self.admin_log(actor, "take_money", f"{code} -{amount}")
+        return f"✅ {int(amount):,} از {code} کسر شد."
+
+    async def admin_tax_user(self, actor: int, code: str, amount: float) -> str:
+        """Tax one country into UN treasury."""
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        amount = float(amount)
+        if amount <= 0:
+            raise GameError("مبلغ نامعتبر")
+        async with self.db.transaction() as tx:
+            c = await tx.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", (code,))
+            if not c:
+                raise GameError("کشور یافت نشد")
+            have = float(c["treasury"])
+            if have < amount:
+                raise GameError("موجودی کاربر برای این مالیات کافی نیست")
+            un = await tx.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", (UN_CODE,))
+            if not un:
+                raise GameError("خزانه سازمان ملل یافت نشد")
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (have - amount, code),
+            )
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (float(un["treasury"]) + amount, UN_CODE),
+            )
+        await self.ledger_write("tax_user", amount, actor, from_c=code, to_c=UN_CODE, reason="مالیات اختصاصی")
+        await self.admin_log(actor, "tax_user", f"{code} {amount}")
+        return f"✅ مالیات {int(amount):,} از {code} به خزانه سازمان ملل واریز شد."
+
+    async def global_tax(self, actor: int, amount: float) -> dict:
+        """Levy amount from all player countries that can pay; credit UN. Idempotent per call."""
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        amount = float(amount)
+        if amount <= 0:
+            raise GameError("مبلغ نامعتبر")
+        collected = 0.0
+        taxed = 0
+        skipped = 0
+        recipients = []
+        async with self.db.transaction() as tx:
+            countries = await tx.fetch(
+                "SELECT * FROM ng_countries WHERE owner_player_id IS NOT NULL AND is_destroyed=0 AND country_code<>$1",
+                (UN_CODE,),
+            )
+            un = await tx.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", (UN_CODE,))
+            if not un:
+                raise GameError("سازمان ملل موجود نیست")
+            un_treas = float(un["treasury"])
+            for c in countries:
+                have = float(c["treasury"])
+                if have < amount:
+                    skipped += 1
+                    continue
+                await tx.execute(
+                    "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                    (have - amount, c["country_code"]),
+                )
+                un_treas += amount
+                collected += amount
+                taxed += 1
+                recipients.append(int(c["owner_player_id"]))
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (un_treas, UN_CODE),
+            )
+        await self.ledger_write(
+            "tax_global", collected, actor, to_c=UN_CODE, reason=f"مالیات سراسری {amount}"
+        )
+        await self.admin_log(actor, "tax_global", f"amt={amount} collected={collected} n={taxed}")
+        notice = (
+            f"💰 مالیات سازمان ملل\n\n"
+            f"از تمامی بازیکنان مبلغ {int(amount):,} واحد پول به‌عنوان مالیات کسر شد.\n\n"
+            f"دلیل: مالیات سراسری سازمان ملل"
+        )
+        await self.broadcast_log("admin", notice)
+        # queue DM notices once
+        for rid in recipients:
+            await self.log_activity("dm_notice", notice, player_id=rid)
+        return {
+            "amount": amount,
+            "collected": collected,
+            "taxed": taxed,
+            "skipped": skipped,
+            "notice": notice,
+            "recipients": recipients,
+        }
+
+    async def condemn_country(self, actor: int, code: str, speech: str) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        speech = (speech or "").strip()
+        if len(speech) < 2:
+            raise GameError("متن سخنرانی کوتاه است")
+        c = await self.db.fetchrow(
+            "SELECT * FROM ng_countries WHERE country_code=$1", (code,)
+        )
+        if not c or c.get("country_code") == UN_CODE:
+            raise GameError("کشور معتبر نیست")
+        name = c["name_fa"]
+        text = (
+            f"⚖️ بیانیه سازمان ملل\n\n"
+            f"سازمان ملل کشور {name} را محکوم کرد.\n\n"
+            f"او در پی سخنرانی خود گفت:\n«{speech[:1500]}»"
+        )
+        await self.broadcast_log("statement", text)
+        await self.log_activity("group_pin_statement", text, UN_CODE, actor)
+        players = await self.db.fetch("SELECT player_id FROM ng_players")
+        for pl in players:
+            await self.log_activity("dm_notice", text, player_id=int(pl["player_id"]))
+        await self.admin_log(actor, "condemn", f"{code}")
+        return f"✅ بیانیه محکومیت {name} ثبت و برای انتشار صف شد."
 

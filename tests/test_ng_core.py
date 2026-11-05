@@ -360,3 +360,37 @@ def test_un_country_owner_only(tmp_path):
         assert "31" in text2
         await db.close()
     run(_t())
+
+
+def test_sqlite_path_resolver_not_under_db_folder():
+    from config.settings import _resolve_sqlite_path
+    path = _resolve_sqlite_path("")
+    # should not be .../world-war/db/ when default
+    assert "world_war.db" in str(path)
+    assert path.name == "world_war.db"
+
+
+def test_player_panel_and_global_tax(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "tax", owner=1)
+        await g.claim(10, "US")
+        await g.claim(11, "DE")
+        await db.execute("UPDATE ng_countries SET treasury=50000 WHERE country_code='US'")
+        await db.execute("UPDATE ng_countries SET treasury=5000 WHERE country_code='DE'")
+        await db.execute("UPDATE ng_countries SET treasury=1000 WHERE country_code='UN'")
+        await g.record_start(10)
+        stats = await g.player_stats()
+        assert stats["total"] >= 2
+        assert stats["active_today"] >= 1
+        page, total = await g.list_players_page(0)
+        assert total >= 2
+        result = await g.global_tax(1, 10000)
+        assert result["taxed"] == 1  # only US can pay
+        assert result["skipped"] >= 1
+        us = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'")
+        un = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='UN'")
+        assert abs(float(us["treasury"]) - 40000) < 1
+        assert float(un["treasury"]) >= 11000
+        await g.condemn_country(1, "DE", "تست محکومیت")
+        await db.close()
+    run(_t())

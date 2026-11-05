@@ -57,6 +57,64 @@ def _get(local, name: str, default: str = "") -> str:
     return default
 
 
+def _android_storage_root() -> Path | None:
+    """Detect Android shared storage (Termux / Pydroid)."""
+    for c in (Path("/storage/emulated/0"), Path("/sdcard")):
+        try:
+            if c.exists():
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def _resolve_sqlite_path(explicit: str) -> Path:
+    """Prefer /storage/emulated/0/worldwarbot/DB on phone; migrate old paths."""
+    import shutil
+
+    if explicit and str(explicit).strip():
+        path = Path(str(explicit).strip())
+        if not path.is_absolute():
+            path = ROOT / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    android = _android_storage_root()
+    if android is not None:
+        db_dir = android / "worldwarbot" / "DB"
+        try:
+            db_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            db_dir = ROOT / "DB"
+            db_dir.mkdir(parents=True, exist_ok=True)
+        path = db_dir / "world_war.db"
+        if not path.is_file():
+            for oldp in (
+                ROOT / "db" / "world_war.db",
+                android / "worldwarbot" / "world-war" / "db" / "world_war.db",
+                android / "worldwarbot" / "world-war" / "DB" / "world_war.db",
+            ):
+                try:
+                    if oldp.is_file():
+                        shutil.copy2(oldp, path)
+                        break
+                except OSError:
+                    continue
+        return path
+
+    db_dir = ROOT / "DB"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    path = db_dir / "world_war.db"
+    legacy = ROOT / "db" / "world_war.db"
+    if not path.is_file() and legacy.is_file():
+        try:
+            shutil.copy2(legacy, path)
+        except OSError:
+            pass
+    return path
+
+
+
 def load_settings() -> Settings:
     local = _load_local_config()
 
@@ -78,9 +136,8 @@ def load_settings() -> Settings:
     except ValueError as exc:
         raise ValueError("OWNER_ID must be an integer") from exc
 
-    sqlite_path = Path(_get(local, "SQLITE_PATH", "db/world_war.db") or "db/world_war.db")
-    if not sqlite_path.is_absolute():
-        sqlite_path = ROOT / sqlite_path
+    # SQLite only when mode is sqlite. Never create local DB in postgres mode.
+    sqlite_path = _resolve_sqlite_path(_get(local, "SQLITE_PATH", ""))
 
     return Settings(
         bale_token=token,

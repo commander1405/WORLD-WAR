@@ -66,7 +66,31 @@ async def group_log_loop(game: Game, bot):
         await asyncio.sleep(15)
 
 
+async def dm_notice_loop(game: Game, bot):
+    """Send queued private notices (tax, condemn) without re-running finance."""
+    while True:
+        try:
+            rows = await game.db.fetch(
+                "SELECT * FROM ng_activity WHERE kind='dm_notice' ORDER BY id ASC"
+            )
+            batch = rows[:15]
+            for r in batch:
+                pid = r.get("player_id")
+                text = r.get("summary") or ""
+                try:
+                    if pid and hasattr(bot, "send_message"):
+                        await bot.send_message(int(pid), text[:3500])
+                except Exception:
+                    log.exception("dm_notice failed player=%s", pid)
+                await game.db.execute("DELETE FROM ng_activity WHERE id=$1", (r["id"],))
+                await asyncio.sleep(0.35)
+        except Exception:
+            log.exception("dm_notice loop")
+        await asyncio.sleep(20)
+
+
 async def owner_inbox_loop(game: Game, bot, owner_id: int):
+
     if not owner_id:
         return
     while True:
@@ -114,6 +138,7 @@ async def async_main() -> None:
         register_handlers(bot, {"game": game, "settings": settings, "db": db})
         asyncio.create_task(group_log_loop(game, bot))
         asyncio.create_task(owner_inbox_loop(game, bot, settings.owner_id))
+        asyncio.create_task(dm_notice_loop(game, bot))
         log.info("Starting bot connect()")
         async with bot:
             await bot.connect()
