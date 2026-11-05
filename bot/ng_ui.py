@@ -13,6 +13,7 @@ from modules.ng.catalog import CATALOG, CAT_FA, items_in_category
 from modules.ng.guide import guide_menu_rows, guide_page, GUIDE_SECTIONS
 from modules.ng.game import GameError
 from modules.ng.alliances import AllianceError, create_cost, RENAME_COST
+from modules.ng.control import ControlError
 
 log = logging.getLogger(__name__)
 
@@ -244,6 +245,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("جنگ باز", "ng:owar:1"), ("جنگ بسته", "ng:owar:0")],
                     [("هسته‌ای فعال", "ng:onuke:1"), ("هسته‌ای خاموش", "ng:onuke:0")],
                     [("بیانیه‌ها", "ng:ostmt"), ("درخواست‌های NPT", "ng:onpt")],
+                    [("📜 قوانین در انتظار", "ng:olaws")],
                     [("🔕 در دسترس نیستم", "ng:oaway")],
                     [("تنظیم لاگ‌ها", "ng:ologs")],
                     [("📝 پیام /start", "ng:ostart"), ("ℹ️ درباره ما", "ng:oabout")],
@@ -406,6 +408,35 @@ def register_handlers(bot, app_ctx: dict):
                     except (AllianceError, GameError, ValueError, KeyError) as e:
                         msg = f"❌ {e}"
                     _pending.pop(pid, None)
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "law_title":
+                    st["title"] = text.strip()[:80]
+                    st["kind"] = "law_body"
+                    _pending[pid] = st
+                    await reply(message, "متن کامل قانون را بنویسید (حداقل ۲۰ کاراکتر):", ik([cancel_row()]))
+                    return
+                if kind == "law_body":
+                    st = _pending.pop(pid, {})
+                    if not code:
+                        await reply(message, "کشور ندارید", main_kb(owner))
+                        return
+                    try:
+                        msg = await game.control.submit_law(code, pid, st.get("title") or "قانون", text)
+                    except ControlError as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "law_bonus":
+                    st = _pending.pop(pid, {})
+                    try:
+                        bonus = float(text.replace(",", "").strip() or 0)
+                    except Exception:
+                        bonus = 0
+                    try:
+                        msg = await game.control.review_law(int(st["law_id"]), pid, True, bonus)
+                    except ControlError as e:
+                        msg = f"❌ {e}"
                     await reply(message, msg, main_kb(owner))
                     return
                 if kind == "ref_code":
@@ -598,6 +629,7 @@ def register_handlers(bot, app_ctx: dict):
                     return
                 card = await game.country_card(code)
                 rows = [
+                    [("🏛 کنترل کشور", "ng:ctrl")],
                     [("📦 انبار", "ng:go:inv"), ("💰 اقتصاد", "ng:go:eco")],
                     [("📜 گزارش", "ng:go:rep")],
                     back_row(),
@@ -605,21 +637,30 @@ def register_handlers(bot, app_ctx: dict):
                 await reply(message, card, ik(rows))
                 return
 
+            if text == BTN_CTRL:
+                if not code:
+                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    return
+                try:
+                    text_c = await game.control.panel_text(code)
+                except Exception:
+                    log.exception("control panel")
+                    text_c = "کنترل کشور"
+                rows = [
+                    [("📜 تصویب قوانین", "ng:ctrl:laws")],
+                    [("🌊 کنترل تنگه‌ها", "ng:ctrl:straits")],
+                    [("✈️ پروازها", "ng:ctrl:flights"), ("🚢 دریایی", "ng:ctrl:maritime")],
+                    [("🌐 اینترنت", "ng:ctrl:net")],
+                    back_row(),
+                ]
+                await reply(message, text_c, ik(rows))
+                return
+
             if text == BTN_ECO:
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
                     return
-                c = await game.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
-                await reply(
-                    message,
-                    f"💰 اقتصاد {c['name_fa']}\n"
-                    f"خزانه: {int(float(c['treasury'])):,} {c['currency_name_fa']}\n"
-                    f"درآمد روزانه: {int(float(c['daily_income'])):,}\n"
-                    f"هزینه نگهداری: {int(float(c['daily_expense'])):,}\n"
-                    f"خالص روزانه: {int(float(c['daily_income'])-float(c['daily_expense'])):,}\n"
-                    f"سلامت: {int(float(c['hp']))}/{int(float(c['max_hp']))}",
-                    main_kb(owner),
-                )
+                await reply(message, await game.economy_card(code), main_kb(owner))
                 return
 
             if text == BTN_SHOP:
@@ -715,6 +756,14 @@ def register_handlers(bot, app_ctx: dict):
 
 
             if text == BTN_ATTACK:
+                meta = await game.db.fetchrow("SELECT war_enabled FROM world_meta WHERE id=1")
+                if not meta or not int(meta.get("war_enabled") or 0):
+                    await reply(
+                        message,
+                        "⚠️ امکان انجام حمله وجود ندارد.\n\nدر حال حاضر وضعیت جنگ در جهان بسته است.\nبرای حمله، سازمان ملل باید جنگ را فعال کند.",
+                        main_kb(owner),
+                    )
+                    return
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
                     return
@@ -886,7 +935,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -1320,6 +1369,22 @@ def register_handlers(bot, app_ctx: dict):
 
 
             # attack
+            if data == "ng:atkmenu" or data.startswith("ng:atk:") or data.startswith("ng:fight:") or data.startswith("ng:nuke"):
+                meta = await game.db.fetchrow("SELECT war_enabled FROM world_meta WHERE id=1")
+                if not meta or not int(meta.get("war_enabled") or 0):
+                    await out(
+                        "⚠️ امکان انجام حمله وجود ندارد.\n\nدر حال حاضر وضعیت جنگ در جهان بسته است.\nسازمان ملل باید جنگ را فعال کند."
+                    )
+                    return
+            if data == "ng:atkmenu":
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
+                rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:atk:{c['country_code']}")] for c in countries[:30]]
+                rows.append(back_row())
+                await out("هدف حمله را انتخاب کنید:", ik(rows))
+                return
             if data.startswith("ng:atk:"):
                 if not code:
                     await out("کشور ندارید")
@@ -1667,6 +1732,160 @@ def register_handlers(bot, app_ctx: dict):
                     await out(f"لینک عضویت:\n{ch.get('invite_link') or ch['chat_id']}")
                 return
 
+
+
+
+            # ---- Country control ----
+            if data == "ng:ctrl":
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                text_c = await game.control.panel_text(code)
+                rows = [
+                    [("📜 تصویب قوانین", "ng:ctrl:laws")],
+                    [("🌊 کنترل تنگه‌ها", "ng:ctrl:straits")],
+                    [("✈️ پروازها", "ng:ctrl:flights"), ("🚢 دریایی", "ng:ctrl:maritime")],
+                    [("🌐 اینترنت", "ng:ctrl:net")],
+                    back_row(),
+                ]
+                await out(text_c, ik(rows))
+                return
+            if data == "ng:ctrl:flights":
+                rows = [[("✈️ باز کردن", "ng:ctrl:fly:1"), ("⛔ توقف", "ng:ctrl:fly:0")], back_row()]
+                await out("مدیریت پروازها:", ik(rows))
+                return
+            if data.startswith("ng:ctrl:fly:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    await out(await game.control.toggle_flights(code, pid, data.endswith(":1")))
+                except ControlError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:ctrl:maritime":
+                rows = [[("🚢 باز کردن", "ng:ctrl:sea:1"), ("⛔ توقف", "ng:ctrl:sea:0")], back_row()]
+                await out("مدیریت سفر دریایی:", ik(rows))
+                return
+            if data.startswith("ng:ctrl:sea:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    await out(await game.control.toggle_maritime(code, pid, data.endswith(":1")))
+                except ControlError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:ctrl:net":
+                rows = [[("🌐 وصل", "ng:ctrl:net:1"), ("⛔ قطع", "ng:ctrl:net:0")], back_row()]
+                await out("مدیریت اینترنت:", ik(rows))
+                return
+            if data.startswith("ng:ctrl:net:") and data.count(":") == 3:
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    await out(await game.control.toggle_internet(code, pid, data.endswith(":1")))
+                except ControlError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:ctrl:straits":
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                rows = []
+                straits = await game.control.list_controllable_straits(code)
+                if not straits:
+                    await out("کشور شما اختیار کنترل هیچ تنگه استراتژیکی را ندارد.", ik([back_row()]))
+                    return
+                for s in straits:
+                    st = "بسته ⛔" if int(s["closed"]) else "باز ✅"
+                    rows.append([(f"{s['name_fa']} ({st})", f"ng:strait:{s['strait_code']}")])
+                rows.append(back_row())
+                await out("تنگه‌های تحت اختیار شما:", ik(rows))
+                return
+            if data.startswith("ng:strait:") and data.count(":") == 2:
+                sc = data.split(":")[-1]
+                rows = [
+                    [("⛔ بستن تنگه", f"ng:straitclose:{sc}"), ("✅ باز کردن", f"ng:straitopen:{sc}")],
+                    back_row(),
+                ]
+                await out("عملیات تنگه:", ik(rows))
+                return
+            if data.startswith("ng:straitclose:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    await out(await game.control.toggle_strait(code, pid, data.split(":")[-1], True))
+                except ControlError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:straitopen:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    await out(await game.control.toggle_strait(code, pid, data.split(":")[-1], False))
+                except ControlError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:ctrl:laws":
+                rows = [
+                    [("✍️ قانون جدید", "ng:lawnew")],
+                    [("📋 قوانین فعال من", "ng:lawmine")],
+                    back_row(),
+                ]
+                await out("📜 تصویب قوانین\nهر کشور حداکثر ۳ قانون در روز می‌تواند ثبت کند.", ik(rows))
+                return
+            if data == "ng:lawnew":
+                _pending[pid] = {"kind": "law_title"}
+                await out("عنوان قانون را بنویسید:", ik([cancel_row()]))
+                return
+            if data == "ng:lawmine":
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                laws = await game.control.active_laws_for(code)
+                if not laws:
+                    await out("قانون فعالی ندارید.")
+                    return
+                lines = ["قوانین فعال:"]
+                for L in laws:
+                    lines.append(f"• #{L['id']} {L['title']} (+{int(float(L['income_bonus'] or 0)):,}/روز)")
+                await out("\n".join(lines))
+                return
+            if data == "ng:olaws":
+                laws = await game.control.pending_laws()
+                rows = []
+                lines = [f"📜 قوانین در انتظار: {len(laws)}"]
+                for L in laws[:20]:
+                    name = await game.country_label(L["country_code"])
+                    lines.append(f"#{L['id']} {name}: {L['title']}")
+                    rows.append([
+                        (f"✅ #{L['id']}", f"ng:lawok:{L['id']}"),
+                        (f"❌ #{L['id']}", f"ng:lawno:{L['id']}"),
+                    ])
+                rows.append(back_row())
+                await out("\n".join(lines), ik(rows))
+                return
+            if data.startswith("ng:lawok:"):
+                lid = int(data.split(":")[-1])
+                _pending[pid] = {"kind": "law_bonus", "law_id": lid}
+                await out("در صورت تمایل، پاداش درآمد روزانه این قانون را به عدد بنویسید (۰ تا ۵ میلیون). برای بدون پاداش ۰ بفرستید:")
+                return
+            if data.startswith("ng:lawno:"):
+                try:
+                    await out(await game.control.review_law(int(data.split(":")[-1]), pid, False))
+                except ControlError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:go:eco":
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                await out(await game.economy_card(code))
+                return
 
 
             # ---- Double HP (owner only) ----

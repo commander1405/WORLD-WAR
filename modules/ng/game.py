@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from database.interface import Database
 from modules.ng.catalog import CATALOG, CAT_FA
 from modules.ng.alliances import AllianceService, AllianceError, create_cost, DESTROY_WAIT_SEC
+from modules.ng.control import ControlService, ControlError
 
 log = logging.getLogger(__name__)
 TEHRAN = ZoneInfo("Asia/Tehran")
@@ -30,6 +31,7 @@ class Game:
         self.group_id = group_id
         self._cat = {c["item_code"]: c for c in CATALOG}
         self.alliances = AllianceService(self)
+        self.control = ControlService(self)
 
     # ---------- bootstrap ----------
     async def bootstrap(self) -> None:
@@ -55,6 +57,10 @@ class Game:
                 await self.db.execute(stmt)
             except Exception:
                 pass
+        try:
+            await self.control.ensure_tables()
+        except Exception:
+            pass
         await self._seed_catalog()
         await self._seed_countries()
         await self.ensure_un_country()
@@ -82,6 +88,10 @@ class Game:
                 await self.db.execute(stmt)
             except Exception:
                 pass
+        try:
+            await self.control.ensure_tables()
+        except Exception:
+            pass
         await self._seed_catalog()
 
     async def _seed_catalog(self) -> None:
@@ -300,6 +310,15 @@ class Game:
             m *= await self.alliances.shop_mult_for_player(pid)
         except Exception:
             pass
+        try:
+            code = country.get("country_code") if country else None
+            if code:
+                m *= await self.control.satisfaction_shop_mult(code)
+                oil = await self.control.global_oil_price_mult()
+                # mild global pressure already in oil mult for energy items applied in cart later
+                m *= min(1.15, 1.0 + (oil - 1.0) * 0.2)
+        except Exception:
+            pass
         return m
 
     def shop_price_multiplier(self, country: dict) -> float:
@@ -404,7 +423,8 @@ class Game:
             await tx.execute("DELETE FROM ng_cart WHERE player_id=$1", (pid,))
         await self.recalc_income(country_code)
         await self.log_activity("buy", f"خرید به مبلغ {int(total):,}", country_code, pid)
-        await self.broadcast_log("buy", f"🛒 کشور {country_code} خرید انجام داد. مبلغ: {int(total):,}")
+        label = await self.country_label(country_code)
+        await self.broadcast_log("buy", f"🛒 کشور {label} یک خرید جدید انجام داد.\nمبلغ: {int(total):,}")
         return f"✅ خرید موفق\nمبلغ: {int(total):,}"
 
     async def recalc_income(self, code: str) -> None:
@@ -426,7 +446,7 @@ class Game:
         )
 
     async def daily_payout_all(self) -> int:
-        """Pay once per Tehran calendar day: base grant + building net."""
+        """Pay once per Tehran calendar day: base + buildings + law bonus, modifiers applied."""
         today = datetime.now(TEHRAN).date().isoformat()
         countries = await self.db.fetch(
             "SELECT * FROM ng_countries WHERE owner_player_id IS NOT NULL AND is_destroyed=0"
@@ -434,19 +454,26 @@ class Game:
         n = 0
         for c in countries:
             code = c["country_code"]
-            if code == UN_CODE:
-                # UN still can receive if owned; keep consistent
-                pass
             exists = await self.db.fetchrow(
                 "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
                 (code, today),
             )
             if exists:
                 continue
+            try:
+                ctrl = await self.control.ensure_control(code)
+                base = float(ctrl["base_daily_income"] or 20_000_000)
+                law_bonus = await self.control.law_income_bonus(code)
+                mod = await self.control.income_modifier(code)
+            except Exception:
+                base = float(getattr(self, "BASE_DAILY_GRANT", 20_000_000))
+                law_bonus = 0.0
+                mod = 1.0
             await self.recalc_income(code)
             c2 = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
             net_buildings = float(c2["daily_income"]) - float(c2["daily_expense"])
-            total = float(self.BASE_DAILY_GRANT) + net_buildings
+            total = (base + law_bonus + net_buildings) * mod
+            total = max(0.0, total)
             async with self.db.transaction() as tx:
                 again = await tx.fetchrow(
                     "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
@@ -465,19 +492,16 @@ class Game:
             n += 1
             await self.log_activity(
                 "daily",
-                f"درآمد روزانه: پایه {int(self.BASE_DAILY_GRANT):,} + ساختمان {int(net_buildings):,} = {int(total):,}",
+                f"درآمد روزانه: {int(total):,} (ضریب {mod:.2f})",
                 code,
             )
             try:
-                await self.ledger_write(
-                    "daily_grant", total, int(c2.get("owner_player_id") or 0),
-                    to_c=code, reason=f"daily {today}",
-                )
+                await self.control.tick_satisfaction_events(code)
             except Exception:
                 pass
         return n
 
-    # ---------- market ----------
+
     async def market_list(self, page=0, per=8):
         rows = await self.db.fetch(
             "SELECT * FROM ng_market WHERE active=1 AND quantity>0 ORDER BY unit_price"
@@ -510,6 +534,16 @@ class Game:
         return "✅ آگهی ثبت شد."
 
     async def market_buy(self, listing_id: int, buyer: str, pid: int) -> str:
+        L0 = await self.db.fetchrow("SELECT * FROM ng_market WHERE id=$1 AND active=1", (listing_id,))
+        if L0:
+            try:
+                blocked = await self.control.is_trade_blocked(buyer, L0["seller_country"], L0["item_code"])
+                if blocked:
+                    raise GameError(blocked)
+            except GameError:
+                raise
+            except Exception:
+                pass
         async with self.db.transaction() as tx:
             L = await tx.fetchrow("SELECT * FROM ng_market WHERE id=$1 AND active=1", (listing_id,))
             if not L or float(L["quantity"]) <= 0:
@@ -782,7 +816,15 @@ class Game:
         # effectiveness by attack type
         kind_factor = {"air": 1.0, "ground": 0.4, "sea": 0.25, "nuclear": 0.15}.get(attack_kind, 0.5)
         disable = await self.active_cyber_disable_ratio(code)
-        effective = base * kind_factor * (1.0 - disable)
+        bonus = 0.0
+        try:
+            if kind in ("air", "missile", "nuke"):
+                bonus += await self.control.defense_air_bonus(code)
+            if kind in ("sea", "naval"):
+                bonus += await self.control.defense_sea_bonus(code)
+        except Exception:
+            pass
+        effective = base * kind_factor * (1.0 - disable) + bonus
         effective = min(self.DEFENSE_COVER_CAP, max(0.0, effective))
         return effective, {
             "defense_power": raw,
@@ -848,6 +890,16 @@ class Game:
                 raise
             except Exception:
                 pass
+        # internet off on target → near-zero success
+        chance = 1.0
+        try:
+            chance = await self.control.cyber_defense_bonus(target)
+        except Exception:
+            pass
+        import random as _rnd
+        if _rnd.random() > chance:
+            await self._consume_item(attacker, "cyber_hack_def", 1)
+            return "❌ عملیات سایبری تقریباً شکست خورد (اینترنت هدف قطع است یا پدافند سایبری قوی است). آیتم مصرف شد."
         await self._consume_item(attacker, "cyber_hack_def", 1)
         ends = now + timedelta(seconds=self.CYBER_DEF_DURATION_SEC)
         nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_cyber_effects")
@@ -1262,8 +1314,8 @@ class Game:
     # ---------- statements ----------
     async def submit_statement(self, code: str, pid: int, body: str) -> str:
         body = body.strip()
-        if len(body) < 5:
-            raise GameError("متن بیانیه خیلی کوتاه است.")
+        if len(body) < 50:
+            raise GameError("متن بیانیه باید حداقل ۵۰ کاراکتر باشد.")
         nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_statements")
         now = datetime.now(timezone.utc).isoformat()
         sid = int(nid["id"])
@@ -1415,7 +1467,7 @@ class Game:
         tables = [
             "ng_cart","ng_market","ng_peace","ng_statements","ng_daily_payouts",
             "ng_activity","ng_admin_log","ng_buildings","ng_inventory","ng_players",
-            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode","ng_finance_ledger","ng_player_activity","ng_cyber_effects","ng_referrals","ng_alliances","ng_alliance_members","ng_alliance_tx","ng_alliance_exits","ng_player_flags",
+            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode","ng_finance_ledger","ng_player_activity","ng_cyber_effects","ng_referrals","ng_alliances","ng_alliance_members","ng_alliance_tx","ng_alliance_exits","ng_player_flags","ng_country_control","ng_laws","ng_sanctions","ng_law_daily","ng_defense_hits",
         ]
         async with self.db.transaction() as tx:
             for t in tables:
@@ -1728,18 +1780,66 @@ class Game:
         countries = await self.list_countries(for_owner=for_owner)
         free = sum(1 for c in countries if not c.get("owner_player_id") and c.get("country_code") != UN_CODE)
         owned = sum(1 for c in countries if c.get("owner_player_id") and c.get("country_code") != UN_CODE)
-        total_public = 30
-        total_shown = len([c for c in countries if c.get("country_code") != UN_CODE]) if not for_owner else len(countries)
-        war = "باز" if meta and int(meta.get("war_enabled") or 0) else "بسته"
+        war = "فعال ⚔️" if meta and int(meta.get("war_enabled") or 0) else "غیرفعال 🕊"
         nuke = "فعال" if meta and int(meta.get("nuclear_enabled") or 0) else "غیرفعال"
+        started = (meta or {}).get("started_at") or "—"
+        try:
+            dt = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            started_fa = dt.astimezone(TEHRAN).strftime("%Y/%m/%d %H:%M")
+        except Exception:
+            started_fa = str(started)[:19]
+        total = 31 if for_owner else 30
         lines = [
-            "🌍 وضعیت جهان",
-            f"شروع جهان: {(meta or {}).get('started_at') or '—'}",
-            f"جنگ: {war}",
-            f"هسته‌ای بازی: {nuke}",
-            f"تعداد کشورها: {30 if not for_owner else 31}",
-            f"کشور آزاد: {free} | دارای بازیکن: {owned}",
-            f"ریست‌ها: {int((meta or {}).get('reset_count') or 0)}",
+            "🌍 گزارش وضعیت جهان",
+            "",
+            "━━━━━━━━━━━━━━",
+            "🗺 اطلاعات جهان",
+            f"👥 کشورهای ثبت‌شده: {total}",
+            f"🟢 کشورهای دارای رهبر: {owned}",
+            f"⚪ کشورهای آزاد: {free}",
+            f"⚔️ وضعیت جنگ: {war}",
+            f"☢ سیستم هسته‌ای: {nuke}",
+            "",
+            "━━━━━━━━━━━━━━",
+            "📊 وضعیت کلی",
+            f"🔄 تعداد بازنشانی‌ها: {int((meta or {}).get('reset_count') or 0)}",
+            f"🕒 آغاز جهان (تهران): {started_fa}",
+        ]
+        return "\n".join(lines)
+
+    async def economy_card(self, code: str) -> str:
+        c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
+        if not c:
+            return "کشور یافت نشد"
+        try:
+            ctrl = await self.control.ensure_control(code)
+            base = float(ctrl["base_daily_income"])
+            mod = await self.control.income_modifier(code)
+            law_b = await self.control.law_income_bonus(code)
+            sat = float(ctrl["satisfaction"])
+        except Exception:
+            base, mod, law_b, sat = 20_000_000.0, 1.0, 0.0, 70.0
+        net = float(c["daily_income"]) - float(c["daily_expense"])
+        est = (base + law_b + net) * mod
+        title = await self.country_label(code)
+        lines = [
+            f"🏛 وضعیت اقتصادی {title}",
+            "",
+            "━━━━━━━━━━━━━━",
+            "💰 خزانه کل:",
+            f"{int(float(c['treasury'])):,} {c.get('currency_name_fa') or ''}",
+            "",
+            f"📈 درآمد ساختمان‌ها: {int(float(c['daily_income'])):,}",
+            f"📉 هزینه نگهداری: {int(float(c['daily_expense'])):,}",
+            f"🏛 درآمد پایه: {int(base):,}",
+            f"📜 پاداش قوانین: {int(law_b):,}",
+            f"⚙️ ضریب شرایط: {mod:.2f}",
+            f"⚖️ برآورد خالص روزانه: {int(est):,}",
+            "",
+            f"❤️ سلامت: {int(float(c['hp']))}/{int(float(c['max_hp']))}",
+            f"😊 رضایت مردم: {sat:.0f}/100",
         ]
         return "\n".join(lines)
 

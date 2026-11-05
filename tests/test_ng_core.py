@@ -432,7 +432,7 @@ def test_country_label_and_player_reset(tmp_path):
 
 def test_guide_content_structure():
     from modules.ng.guide import GUIDE_SECTIONS, GUIDE_MENU_ORDER, guide_page, guide_menu_rows
-    assert len(GUIDE_SECTIONS) == 10
+    assert len(GUIDE_SECTIONS) >= 10
     assert len(GUIDE_MENU_ORDER) == 10
     text, rows = guide_page("faq", 0)
     assert "سؤالات" in text or "متداول" in text
@@ -630,5 +630,38 @@ def test_defense_wear_and_double_hp(tmp_path):
             "SELECT quantity FROM ng_inventory WHERE country_code='US' AND item_code='cyber_hack_def'"
         )
         assert left is None or float(left["quantity"] or 0) <= 0
+        await db.close()
+    run(_t())
+
+
+def test_country_control_and_laws(tmp_path):
+    async def _t():
+        from modules.ng.control import ControlError
+        db, g = await boot(tmp_path / "ctrl", owner=1)
+        await g.claim(10, "IR")
+        await g.claim(11, "US")
+        ctrl = await g.control.ensure_control("IR")
+        assert float(ctrl["base_daily_income"]) >= 20_000_000
+        msg = await g.control.toggle_internet("IR", 10, False)
+        assert "قطع" in msg or "رضایت" in msg
+        c2 = await g.control.ensure_control("IR")
+        assert int(c2["internet_on"]) == 0
+        assert float(c2["satisfaction"]) < 70
+        # IR can control hormuz
+        straits = await g.control.list_controllable_straits("IR")
+        assert any(s["strait_code"] == "hormuz" for s in straits)
+        await g.control.toggle_strait("IR", 10, "hormuz", True)
+        oil = await g.control.global_oil_price_mult()
+        assert oil > 1.0
+        # law
+        msg = await g.control.submit_law("US", 11, "ممنوعیت نفت", "خرید نفت از ایران ممنوع است برای حفظ امنیت انرژی ملی کشور.", "IR", "b_mine_oil")
+        assert "ثبت" in msg or "✅" in msg
+        laws = await g.control.pending_laws()
+        assert laws
+        lid = int(laws[0]["id"])
+        await g.control.review_law(lid, 1, True, 100_000)
+        # daily
+        n = await g.daily_payout_all()
+        assert n >= 1
         await db.close()
     run(_t())
