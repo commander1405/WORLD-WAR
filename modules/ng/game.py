@@ -55,9 +55,15 @@ class Game:
         return {k: True for k in keys}
 
     async def _seed_catalog(self) -> None:
+        """Insert new items; refresh metadata for existing without wiping inventory."""
         for c in CATALOG:
             exists = await self.db.fetchrow(
                 "SELECT item_code FROM ng_shop_catalog WHERE item_code=$1", (c["item_code"],)
+            )
+            vals = (
+                c["item_code"], c["category"], c["name_fa"], c["description_fa"],
+                c["unit_price"], c["max_per_order"], c["power_score"],
+                c["daily_income"], c["maintenance"], c["is_building"],
             )
             if not exists:
                 await self.db.execute(
@@ -67,12 +73,20 @@ class Game:
                         power_score, daily_income, maintenance, is_building
                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                     """,
-                    (
-                        c["item_code"], c["category"], c["name_fa"], c["description_fa"],
-                        c["unit_price"], c["max_per_order"], c["power_score"],
-                        c["daily_income"], c["maintenance"], c["is_building"],
-                    ),
+                    vals,
                 )
+            else:
+                await self.db.execute(
+                    """
+                    UPDATE ng_shop_catalog SET
+                        category=$2, name_fa=$3, description_fa=$4, unit_price=$5,
+                        max_per_order=$6, power_score=$7, daily_income=$8,
+                        maintenance=$9, is_building=$10
+                    WHERE item_code=$1
+                    """,
+                    vals,
+                )
+            self._cat[c["item_code"]] = c
 
     async def _seed_countries(self) -> None:
         data = json.loads(SEED_PATH.read_text(encoding="utf-8"))
@@ -246,7 +260,7 @@ class Game:
             await tx.execute(
                 "UPDATE ng_players SET country_code=$1 WHERE player_id=$2", (code, pid)
             )
-        await self.log_activity("claim", f"انتخاب کشور {code}", code, pid)
+        await self.log_activity("claim", f"انتخاب کشور {await self.country_name_only(code)}", code, pid)
         return await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
 
     # ---------- economy / shop ----------
@@ -635,14 +649,28 @@ class Game:
             "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (code,)
         )
         total = 0.0
-        cat_map = {"ground": "ground", "air": "air", "sea": "sea", "defense": "defense"}
-        want = cat_map.get(kind, kind)
         for r in inv:
             meta = self._cat.get(r["item_code"])
             if not meta:
                 continue
-            if meta["category"] == want or (kind == "ground" and meta["category"] == "defense"):
-                total += float(meta.get("power_score") or 0) * float(r["quantity"])
+            cat = meta["category"]
+            ps = float(meta.get("power_score") or 0) * float(r["quantity"])
+            if kind == "ground" and cat in ("ground", "defense"):
+                total += ps
+            elif kind == "ground" and cat == "missile" and r["item_code"] in ("m_cruise", "m_ballistic", "m_agm"):
+                total += ps * 0.8
+            elif kind == "air" and cat == "air":
+                total += ps
+            elif kind == "air" and cat == "missile" and r["item_code"] in ("m_aam", "m_agm"):
+                total += ps * 0.7
+            elif kind == "sea" and cat == "sea":
+                total += ps
+            elif kind == "sea" and cat == "missile" and r["item_code"] == "m_antiship":
+                total += ps
+            elif kind == "defense" and cat in ("defense",):
+                total += ps
+            elif kind == "defense" and cat == "missile" and r["item_code"] in ("m_sam_patriot", "m_sam_s400"):
+                total += ps
         return total
 
     async def available_force(self, code: str, kind: str) -> tuple[float, list]:
@@ -896,9 +924,13 @@ class Game:
                         (until, int(prev)),
                     )
 
+        atk_name = await self.country_label(attacker)
+        def_name = await self.country_label(defender)
+        atk_name = await self.country_label(attacker)
+        def_name = await self.country_label(defender)
         report = (
             f"⚔️ گزارش درگیری\n\n"
-            f"مهاجم: {attacker}\nمدافع: {defender}\nنوع: {kind}\nشدت: {int(percent)}٪\n"
+            f"مهاجم: {atk_name}\nمدافع: {def_name}\nنوع: {kind}\nشدت: {int(percent)}٪\n"
             f"نتیجه: {result}\n"
             f"خسارت سلامت: {int(damage)}\n"
             f"سلامت فعلی مدافع: {int(max(0, new_hp))}\n"
@@ -908,7 +940,7 @@ class Game:
         await self.log_activity("attack", report.replace("\n", " | "), attacker, pid)
         await self.broadcast_log("attack", report)
         if new_hp <= 0:
-            await self.broadcast_log("destroy", f"💥 کشور {defender} نابود شد.")
+            await self.broadcast_log("destroy", f"💥 کشور {def_name} نابود شد.")
         return report
 
     async def _tx_log_activity(self, tx, kind, summary, country=None, player_id=None):
@@ -1107,6 +1139,28 @@ class Game:
             return
         # store as activity for group publisher
         await self.log_activity("group_" + kind, text)
+
+
+    async def country_label(self, code: str | None) -> str:
+        """Human-readable country name for UI (never raw codes like IR)."""
+        if not code:
+            return "نامشخص"
+        if code == UN_CODE:
+            return "🇺🇳 سازمان ملل"
+        row = await self.db.fetchrow(
+            "SELECT flag, name_fa FROM ng_countries WHERE country_code=$1", (code,)
+        )
+        if row:
+            return f"{row.get('flag') or ''} {row['name_fa']}".strip()
+        return str(code)
+
+    async def country_name_only(self, code: str | None) -> str:
+        if not code:
+            return "نامشخص"
+        row = await self.db.fetchrow(
+            "SELECT name_fa FROM ng_countries WHERE country_code=$1", (code,)
+        )
+        return (row or {}).get("name_fa") or str(code)
 
     async def country_card(self, code: str) -> str:
         c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
@@ -2264,19 +2318,21 @@ class Game:
                         "UPDATE ng_players SET country_code=NULL, destroy_cooldown_until=$1 WHERE player_id=$2",
                         (until, int(prev)),
                     )
+        atk_name = await self.country_label(attacker)
+        def_name = await self.country_label(defender)
         report = (
-            f"☢️ گزارش حمله اتمی (بازی)\\n\\n"
-            f"مهاجم: {attacker}\\nمدافع: {defender}\\n"
-            f"تخریب: {pct*100:.1f}٪ از حداکثر سلامت\\n"
-            f"خسارت: {int(damage)}\\n"
-            f"سلامت فعلی: {int(new_hp)}/{int(float(d['max_hp']))}\\n"
+            f"☢️ گزارش حمله اتمی (بازی)\n\n"
+            f"مهاجم: {atk_name}\nمدافع: {def_name}\n"
+            f"تخریب: {pct*100:.1f}٪ از حداکثر سلامت\n"
+            f"خسارت: {int(damage)}\n"
+            f"سلامت فعلی: {int(new_hp)}/{int(float(d['max_hp']))}\n"
             f"بمب مصرف‌شده: ۱"
         )
-        await self.log_activity("attack", report.replace("\\n", " | "), attacker, pid)
-        await self.broadcast_log("attack", report.replace("\\n", "\n"))
+        await self.log_activity("attack", report.replace("\n", " | "), attacker, pid)
+        await self.broadcast_log("attack", report)
         if new_hp <= 0:
-            await self.broadcast_log("destroy", f"💥 کشور {defender} در اثر حمله اتمی نابود شد.")
-        return report.replace("\\n", "\n")
+            await self.broadcast_log("destroy", f"💥 کشور {def_name} در اثر حمله اتمی نابود شد.")
+        return report
 
 
     # ---------- owner users panel ----------
@@ -2516,4 +2572,67 @@ class Game:
             await self.log_activity("dm_notice", text, player_id=int(pl["player_id"]))
         await self.admin_log(actor, "condemn", f"{code}")
         return f"✅ بیانیه محکومیت {name} ثبت و برای انتشار صف شد."
+
+    async def reset_player(self, actor: int, target_id: int) -> str:
+        """Free player country and progress; keep identity, bans, audit logs."""
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        if int(target_id) == int(self.owner_id or 0):
+            raise GameError("ریست مالک / سازمان ملل مجاز نیست.")
+        p = await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (target_id,))
+        if not p:
+            raise GameError("بازیکن یافت نشد")
+        code = p.get("country_code")
+        if code == UN_CODE:
+            raise GameError("کشور سازمان ملل قابل ریست از این مسیر نیست.")
+        label = await self.country_label(code) if code else "بدون کشور"
+        async with self.db.transaction() as tx:
+            if code:
+                await tx.execute(
+                    """
+                    UPDATE ng_countries SET
+                        owner_player_id=NULL, treasury=0, daily_income=0, daily_expense=0,
+                        hp=1000, is_destroyed=0, peace_penalty_until=NULL, claimed_at=NULL
+                    WHERE country_code=$1 AND owner_player_id=$2
+                    """,
+                    (code, target_id),
+                )
+                await tx.execute("DELETE FROM ng_inventory WHERE country_code=$1", (code,))
+                await tx.execute("DELETE FROM ng_buildings WHERE country_code=$1", (code,))
+                await tx.execute("DELETE FROM ng_cart WHERE player_id=$1", (target_id,))
+                await tx.execute("DELETE FROM ng_workshop WHERE country_code=$1", (code,))
+                await tx.execute("DELETE FROM ng_workshop_jobs WHERE country_code=$1", (code,))
+                await tx.execute("DELETE FROM ng_war_state WHERE country_code=$1", (code,))
+                try:
+                    await tx.execute(
+                        "UPDATE ng_market SET status='cancelled' WHERE seller_country=$1 AND status='open'",
+                        (code,),
+                    )
+                except Exception:
+                    pass
+                try:
+                    await tx.execute(
+                        "UPDATE ng_peace SET status='expired' WHERE (a_code=$1 OR b_code=$1) AND status IN ('pending','active')",
+                        (code,),
+                    )
+                except Exception:
+                    pass
+            await tx.execute(
+                "UPDATE ng_players SET country_code=NULL WHERE player_id=$1",
+                (target_id,),
+            )
+        await self.admin_log(actor, "player_reset", f"target={target_id} country={code}")
+        await self.log_activity(
+            "admin",
+            f"ریست کاربر {target_id} — کشور {label} آزاد شد",
+            code,
+            actor,
+        )
+        return (
+            f"✅ کاربر {target_id} ریست شد.\n"
+            f"کشور قبلی: {label}\n"
+            f"اکنون می‌تواند کشور جدید انتخاب کند.\n"
+            "بن بودن او تغییر نکرد. لاگ‌ها حفظ شدند."
+        )
+
 

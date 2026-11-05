@@ -632,7 +632,7 @@ def register_handlers(bot, app_ctx: dict):
                     await msg.reply(str(text)[:3500], components=kb or main_kb(owner))
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -1016,7 +1016,8 @@ def register_handlers(bot, app_ctx: dict):
                 lines = ["درخواست‌های NPT"]
                 for r in rows_db[:15]:
                     label = "عضویت" if r["request_type"] == "join" else "خروج"
-                    lines.append(f"#{r['id']} {r['country_code']} — {label} — بازیکن {r['player_id']}")
+                    cn = await game.country_name_only(r["country_code"])
+                    lines.append(f"#{r['id']} {cn} — {label} — بازیکن {r['player_id']}")
                     btns.append([
                         (f"✅#{r['id']}", f"ng:nptok:{r['id']}"),
                         (f"❌#{r['id']}", f"ng:nptno:{r['id']}"),
@@ -1094,9 +1095,10 @@ def register_handlers(bot, app_ctx: dict):
                     ]
                     rows = []
                     for p in players:
-                        cc = p.get("country_code") or "?"
+                        cc = p.get("country_code")
+                        cname = await game.country_name_only(cc) if cc else "نامشخص"
                         un = p.get("username") or p["player_id"]
-                        label = f"{un} [{cc}]"
+                        label = f"{un} | {cname}"
                         rows.append([(label[:40], f"ng:ou:{p['player_id']}")])
                     nav = []
                     if page > 0:
@@ -1125,8 +1127,9 @@ def register_handlers(bot, app_ctx: dict):
                 rows_db = await game.db.fetch("SELECT * FROM ng_statements WHERE status='pending'")
                 btns = []
                 for s in rows_db[:15]:
+                    cn = await game.country_name_only(s["country_code"])
                     btns.append([
-                        (f"✅#{s['id']} {s['country_code']}", f"ng:sapp:{s['id']}"),
+                        (f"✅#{s['id']} {cn}", f"ng:sapp:{s['id']}"),
                         (f"❌#{s['id']}", f"ng:srej:{s['id']}"),
                     ])
                 btns.append(back_row())
@@ -1213,10 +1216,44 @@ def register_handlers(bot, app_ctx: dict):
                     [("➕ NPT", f"ng:ounptadd:{tid}"), ("➖ NPT", f"ng:ounptdel:{tid}")],
                     [("💵 دادن پول", f"ng:ougive:{tid}"), ("💸 گرفتن پول", f"ng:outake:{tid}")],
                     [("🧾 مالیات از کاربر", f"ng:outax:{tid}")],
+                    [("♻️ ریست کردن کاربر", f"ng:oureset:{tid}")],
                     [("⬅️ لیست کاربران", "ng:o:players:0")],
                 ]
                 await out(card, ik(rows))
                 return
+
+            if data.startswith("ng:oureset:"):
+                tid = int(data.split(":")[-1])
+                p = await game.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (tid,))
+                if not p:
+                    await out("بازیکن یافت نشد")
+                    return
+                code = p.get("country_code")
+                cname = await game.country_label(code) if code else "بدون کشور"
+                rows = [
+                    [("✅ تأیید ریست", f"ng:ouresetgo:{tid}"), ("❌ انصراف", f"ng:ou:{tid}")],
+                ]
+                text = (
+                    f"آیا مطمئن هستید؟\n\nکاربر: {tid}\nکشور: {cname}\n\n"
+                    "با ریست کردن این کاربر:\n"
+                    "• کشور فعلی او آزاد می‌شود.\n"
+                    "• مالکیت کشور حذف می‌شود.\n"
+                    "• دارایی‌ها و پیشرفت کشور بازنشانی می‌شود.\n"
+                    "• کاربر بدون کشور از ابتدا شروع می‌کند.\n"
+                    "• بن بودن تغییر نمی‌کند.\n"
+                    "• لاگ‌ها و سوابق مالی حفظ می‌شوند.\n\n"
+                    "این عملیات قابل بازگشت نیست."
+                )
+                await out(text, ik(rows))
+                return
+            if data.startswith("ng:ouresetgo:"):
+                tid = int(data.split(":")[-1])
+                try:
+                    await out(await game.reset_player(pid, tid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+
             if data.startswith("ng:ouban:"):
                 tid = int(data.split(":")[-1])
                 try:
@@ -1248,7 +1285,8 @@ def register_handlers(bot, app_ctx: dict):
                     await out("کشور نامشخص")
                     return
                 c = await game.db.fetchrow("SELECT treasury, currency_name_fa FROM ng_countries WHERE country_code=$1", (code,))
-                await out(f"💰 موجودی {code}: {int(float(c['treasury'])):,} {c.get('currency_name_fa') or ''}")
+                cname = await game.country_label(code)
+                await out(f"💰 موجودی {cname}: {int(float(c['treasury'])):,} {c.get('currency_name_fa') or ''}")
                 return
             if data.startswith("ng:ounpt:"):
                 tid = int(data.split(":")[-1])

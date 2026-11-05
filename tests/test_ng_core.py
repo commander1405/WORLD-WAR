@@ -394,3 +394,41 @@ def test_player_panel_and_global_tax(tmp_path):
         await g.condemn_country(1, "DE", "تست محکومیت")
         await db.close()
     run(_t())
+
+
+def test_catalog_has_military_expansion():
+    from modules.ng.catalog import CATALOG, CAT_FA
+    codes = {c["item_code"] for c in CATALOG}
+    assert "a_f22" in codes
+    assert "m_cruise" in codes
+    assert "s_carrier" in codes
+    assert "missile" in CAT_FA
+    # no duplicate item codes
+    assert len(codes) == len(CATALOG)
+
+
+def test_country_label_and_player_reset(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "rst", owner=1)
+        await g.claim(10, "IR")
+        label = await g.country_label("IR")
+        assert "ایران" in label
+        assert "IR" not in label or "ایران" in label
+        await db.execute("UPDATE ng_countries SET treasury=99999 WHERE country_code='IR'")
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('IR','g_inf',5)"
+        )
+        msg = await g.reset_player(1, 10)
+        assert "ریست" in msg
+        p = await db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=10")
+        assert p["country_code"] is None
+        c = await db.fetchrow("SELECT owner_player_id, treasury FROM ng_countries WHERE country_code='IR'")
+        assert c["owner_player_id"] is None
+        inv = await db.fetch("SELECT * FROM ng_inventory WHERE country_code='IR'")
+        assert len(inv) == 0
+        # can reclaim
+        await g.claim(10, "IR")
+        p2 = await db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=10")
+        assert p2["country_code"] == "IR"
+        await db.close()
+    run(_t())
