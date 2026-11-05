@@ -54,6 +54,10 @@ class Game:
         ]
         return {k: True for k in keys}
 
+    async def ensure_shop_catalog(self) -> None:
+        """Re-run catalog seed so new items appear without full world reset."""
+        await self._seed_catalog()
+
     async def _seed_catalog(self) -> None:
         """Insert new items; refresh metadata for existing without wiping inventory."""
         for c in CATALOG:

@@ -73,15 +73,19 @@ CATALOG = [
     {"item_code":"res_uranium","category":"mine","name_fa":"اورانیوم (واحد بازی)","name_en":"Uranium Unit","origin_fa":"عمومی","description_fa":"منبع صلح‌آمیز کارگاه","unit_price":50_000,"max_per_order":100,"power_score":0,"daily_income":0,"maintenance":0,"is_building":0},
 ]
 
+# Ordered for shop display (military & cyber first)
 CAT_FA = {
-    "ground": "نیروی زمینی",
-    "air": "نیروی هوایی",
-    "sea": "نیروی دریایی",
-    "missile": "موشک‌ها",
-    "defense": "پدافند",
-    "mine": "معادن و منابع",
-    "infra": "زیرساخت صنعتی",
-    "nuclear": "فناوری هسته‌ای صلح‌آمیز",
-    "specialist": "متخصصان",
-    "cyber": "هک و امنیت",
+    "cyber": "💻 هک و امنیت",
+    "missile": "🚀 موشک‌ها",
+    "air": "✈️ نیروی هوایی",
+    "sea": "🚢 نیروی دریایی",
+    "ground": "🪖 نیروی زمینی",
+    "defense": "🛡 پدافند",
+    "mine": "⛏ معادن و منابع",
+    "infra": "🏗 زیرساخت صنعتی",
+    "nuclear": "☢ فناوری هسته‌ای",
+    "specialist": "👨‍🔬 متخصصان",
 }
+
+def items_in_category(cat: str) -> list:
+    return [c for c in CATALOG if c.get("category") == cat]

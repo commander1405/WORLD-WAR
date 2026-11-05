@@ -9,7 +9,7 @@ from bale import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from modules.ng.catalog import CATALOG, CAT_FA
+from modules.ng.catalog import CATALOG, CAT_FA, items_in_category
 from modules.ng.guide import guide_menu_rows, guide_page, GUIDE_SECTIONS
 from modules.ng.game import GameError
 
@@ -456,10 +456,27 @@ def register_handlers(bot, app_ctx: dict):
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
                     return
-                rows = [[(name, f"ng:shop:{cat}")] for cat, name in CAT_FA.items()]
+                try:
+                    await game.ensure_shop_catalog()
+                except Exception:
+                    log.exception("shop catalog seed")
+                rows = []
+                pair = []
+                for cat, name in CAT_FA.items():
+                    n = len(items_in_category(cat))
+                    pair.append((f"{name} ({n})", f"ng:shop:{cat}"))
+                    if len(pair) == 2:
+                        rows.append(pair)
+                        pair = []
+                if pair:
+                    rows.append(pair)
                 rows.append([("🛒 سبد خرید", "ng:cart"), ("✅ تسویه حساب", "ng:checkout")])
                 rows.append(back_row())
-                await reply(message, "🛒 فروشگاه — دسته را انتخاب کنید:", ik(rows))
+                await reply(
+                    message,
+                    "🛒 فروشگاه\n\nدسته را انتخاب کنید.\nاولین ردیف: 💻 هک و امنیت — هکر پدافند و هکر دارایی\nسپس موشک‌ها، هوایی، دریایی، زمینی و پدافند.",
+                    ik(rows),
+                )
                 return
 
             if text == BTN_INV:
@@ -700,11 +717,40 @@ def register_handlers(bot, app_ctx: dict):
             # shop
             if data.startswith("ng:shop:"):
                 cat = data.split(":")[-1]
-                items = [c for c in CATALOG if c["category"] == cat]
-                rows = [[(f"{i['name_fa']} — {int(i['unit_price']):,}", f"ng:item:{i['item_code']}")] for i in items]
-                rows.append([("🛒 سبد", "ng:cart")])
+                try:
+                    await game.ensure_shop_catalog()
+                except Exception:
+                    log.exception("shop catalog seed")
+                items = items_in_category(cat)
+                title = CAT_FA.get(cat, cat)
+                if not items:
+                    await out(f"در دسته «{title}» محصولی نیست. ربات را یک‌بار ری‌استارت کنید.")
+                    return
+                rows = []
+                for i in items:
+                    rows.append([(f"{i['name_fa']} — {int(i['unit_price']):,}", f"ng:item:{i['item_code']}")])
+                rows.append([("🛒 سبد", "ng:cart"), ("⬅️ دسته‌ها", "ng:shophome")])
                 rows.append(back_row())
-                await out("محصولات:", ik(rows))
+                await out(f"🛒 {title}\n{len(items)} محصول:", ik(rows))
+                return
+            if data == "ng:shophome":
+                try:
+                    await game.ensure_shop_catalog()
+                except Exception:
+                    pass
+                rows = []
+                pair = []
+                for cat, name in CAT_FA.items():
+                    n = len(items_in_category(cat))
+                    pair.append((f"{name} ({n})", f"ng:shop:{cat}"))
+                    if len(pair) == 2:
+                        rows.append(pair)
+                        pair = []
+                if pair:
+                    rows.append(pair)
+                rows.append([("🛒 سبد خرید", "ng:cart"), ("✅ تسویه حساب", "ng:checkout")])
+                rows.append(back_row())
+                await out("🛒 فروشگاه — دسته را انتخاب کنید:", ik(rows))
                 return
             if data.startswith("ng:item:"):
                 ic = data.split(":")[-1]
