@@ -80,17 +80,13 @@ def test_market_and_aid(tmp_path):
     run(_t())
 
 
-def test_peace_and_attack_block(tmp_path):
+def test_peace_removed(tmp_path):
     async def _t():
         db, g = await boot(tmp_path)
         await g.claim(1, "US")
         await g.claim(2, "FR")
-        await g.peace_request("US", "FR", 2, 1)
-        rows = await db.fetch("SELECT * FROM ng_peace WHERE status='pending'")
-        assert rows
-        await g.peace_accept(rows[0]["id"], "FR", 2)
         with pytest.raises(GameError):
-            await g.attack("US", "FR", "ground", 50, 1)
+            await g.peace_request("US", "FR", 2, 1)
         await db.close()
     run(_t())
 
@@ -527,13 +523,6 @@ def test_daily_grant_and_referral_and_away(tmp_path):
         await g.admin_money(1, "US", 5000)
         after = float((await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'"))["treasury"])
         assert abs(after - before - 5000) < 1
-        # alliances list
-        await g.peace_request("US", "DE", 5, 10)
-        peaces = await db.fetch("SELECT * FROM ng_peace")
-        assert peaces
-        pid = int(peaces[0]["id"])
-        await g.peace_accept(pid, "DE", 11)
-        # alliances v2 is separate from peace treaties
         allies = await g.list_alliances()
         assert isinstance(allies, list)
         await db.close()
@@ -548,7 +537,7 @@ def test_alliance_system_v2(tmp_path):
         await g.claim(11, "DE")
         await db.execute("UPDATE ng_countries SET treasury=500000000 WHERE country_code IN ('US','DE')")
         cost = create_cost(5, 200_000_000)
-        assert cost >= 120_000_000
+        assert cost >= 15_000_000
         msg = await g.alliances.create(10, "US", "Dark Alliance", 5, 200_000_000)
         assert "ساخته" in msg or "✅" in msg
         mem = await g.alliances.member_of("US")

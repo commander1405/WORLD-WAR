@@ -591,6 +591,8 @@ class Game:
 
     # ---------- peace ----------
     async def peace_request(self, a: str, b: str, hours: float, pid: int) -> str:
+        raise GameError("پیمان صلح حذف شده است. از سیستم اتحاد استفاده کنید.")
+        # legacy disabled
         hours = max(1.0, min(20.0, float(hours)))
         if a == b:
             raise GameError("نامعتبر")

@@ -48,7 +48,7 @@ def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
         [BTN_WORKSHOP, BTN_SHOP],
         [BTN_INV, BTN_MKT],
         [BTN_TRADE, BTN_DIPLO],
-        [BTN_PEACE, BTN_TREATY],
+        [BTN_TREATY],
         [BTN_ATTACK, BTN_STMT],
         [BTN_WORLD, BTN_REPORT],
         [BTN_ABOUT, BTN_GUIDE],
@@ -635,16 +635,13 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             if text == BTN_PEACE:
-                if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
-                    return
-                rows = [
-                    [("ارسال درخواست صلح", "ng:peace:new"), ("درخواست‌های ورودی", "ng:peace:inbox")],
-                    [("پیمان‌های فعال", "ng:peace:active")],
-                    back_row(),
-                ]
-                await reply(message, "🕊 پیمان صلح", ik(rows))
+                await reply(
+                    message,
+                    "پیمان صلح حذف شده است.\nبه‌جای آن از «🤝 اتحادها» استفاده کنید.",
+                    main_kb(owner),
+                )
                 return
+
 
             if text == BTN_ATTACK:
                 if not code:
@@ -829,6 +826,192 @@ def register_handlers(bot, app_ctx: dict):
             if data in ("ng:home", "ng:busy"):
                 await out("منوی اصلی" if data == "ng:home" else "این کشور دارای بازیکن است.")
                 return
+
+            # ---- Alliance System 2.0 callbacks ----
+            if data == "ng:acreate":
+                if not code:
+                    await out("ابتدا کشور انتخاب کنید.")
+                    return
+                if await game.alliances.member_of(code):
+                    await out("شما هم‌اکنون عضو یک اتحاد هستید.")
+                    return
+                _pending[pid] = {"kind": "ally_name"}
+                await out("نام اتحاد را بنویسید:")
+                return
+            if data == "ng:acreateyes":
+                st = _pending.pop(pid, None) or {}
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                name = st.get("name")
+                if not name:
+                    await out("اطلاعات ساخت ناقص است. دوباره از «➕ ساخت اتحاد» شروع کنید.")
+                    return
+                try:
+                    msg = await game.alliances.create(
+                        pid,
+                        code,
+                        name,
+                        int(st.get("max_members") or 2),
+                        float(st.get("treasury_cap") or 100_000_000),
+                    )
+                except (AllianceError, GameError) as e:
+                    msg = f"❌ {e}"
+                await out(msg)
+                return
+            if data.startswith("ng:aview:"):
+                aid = int(data.split(":")[-1])
+                a = await game.alliances.get(aid)
+                if not a or a.get("status") != "active":
+                    await out("اتحاد یافت نشد")
+                    return
+                mems = await game.alliances.members(aid)
+                labels = {}
+                for m in mems:
+                    labels[m["country_code"]] = await game.country_label(m["country_code"])
+                text_a = game.alliances.card_text(a, mems, labels)
+                rows = [[("➕ عضویت در اتحاد", f"ng:ajoin:{aid}")], back_row()]
+                await out(text_a, ik(rows))
+                return
+            if data.startswith("ng:ajoin:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    await out(await game.alliances.join(pid, code, int(data.split(":")[-1])))
+                except (AllianceError, GameError) as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:aleave":
+                rows = [[("✅ تأیید خروج", "ng:aleaveyes"), ("❌ انصراف", "ng:home")]]
+                await out("از اتحاد خارج می‌شوید؟", ik(rows))
+                return
+            if data == "ng:aleaveyes":
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                try:
+                    await out(await game.alliances.leave(pid, code))
+                except (AllianceError, GameError) as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:atreasure:"):
+                rows = [
+                    [("➕ واریز", "ng:adep"), ("➖ برداشت (بنیان‌گذار)", "ng:awith")],
+                    [("💸 تقسیم مساوی", "ng:asplit")],
+                    back_row(),
+                ]
+                await out("🏦 خزانه اتحاد", ik(rows))
+                return
+            if data == "ng:adep":
+                _pending[pid] = {"kind": "ally_deposit"}
+                await out("مبلغ واریز را وارد کنید:")
+                return
+            if data == "ng:awith":
+                _pending[pid] = {"kind": "ally_withdraw"}
+                await out("مبلغ برداشت را وارد کنید:")
+                return
+            if data == "ng:asplit":
+                try:
+                    await out(await game.alliances.equal_split(pid))
+                except (AllianceError, GameError) as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:amembers:"):
+                aid = int(data.split(":")[-1])
+                mems = await game.alliances.members(aid)
+                lines = ["👥 اعضای اتحاد"]
+                for m in mems:
+                    role = "👑 بنیان‌گذار" if m["role"] == "founder" else "عضو"
+                    label = await game.country_label(m["country_code"])
+                    lines.append(f"{role}: {label}")
+                await out("\n".join(lines))
+                return
+            if data.startswith("ng:amgmt:"):
+                aid = int(data.split(":")[-1])
+                rows = [
+                    [("✏️ تغییر نام", "ng:arename")],
+                    [("⬆️ ظرفیت اعضا", "ng:aemembers"), ("⬆️ ظرفیت خزانه", "ng:aetreasury")],
+                    [("🚫 اخراج عضو", f"ng:akicklist:{aid}")],
+                    [("🗑 انحلال اتحاد", f"ng:adissolve:{aid}")],
+                    back_row(),
+                ]
+                await out("⚙️ مدیریت اتحاد", ik(rows))
+                return
+            if data == "ng:arename":
+                _pending[pid] = {"kind": "ally_rename"}
+                await out(f"نام جدید را بنویسید (هزینه {RENAME_COST:,}):")
+                return
+            if data == "ng:aemembers":
+                _pending[pid] = {"kind": "ally_emembers"}
+                await out("ظرفیت جدید اعضا (بزرگ‌تر از فعلی):")
+                return
+            if data == "ng:aetreasury":
+                _pending[pid] = {"kind": "ally_etreasury"}
+                await out("ظرفیت جدید خزانه:")
+                return
+            if data.startswith("ng:akicklist:"):
+                aid = int(data.split(":")[-1])
+                mems = await game.alliances.members(aid)
+                rows = []
+                for m in mems:
+                    if m["role"] == "founder":
+                        continue
+                    label = await game.country_label(m["country_code"])
+                    rows.append([(f"اخراج {label}", f"ng:akick:{m['country_code']}")])
+                rows.append(back_row())
+                await out("عضو برای اخراج:", ik(rows) if rows else main_kb(owner))
+                return
+            if data.startswith("ng:akick:"):
+                try:
+                    await out(await game.alliances.kick(pid, data.split(":")[-1]))
+                except (AllianceError, GameError) as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:adissolve:"):
+                aid = int(data.split(":")[-1])
+                rows = [[("✅ تأیید انحلال", f"ng:adissolveyes:{aid}"), ("❌ انصراف", "ng:home")]]
+                await out("اتحاد منحل شود؟ خزانه به بنیان‌گذار برمی‌گردد.", ik(rows))
+                return
+            if data.startswith("ng:adissolveyes:"):
+                try:
+                    await out(await game.alliances.dissolve(pid, int(data.split(":")[-1]), is_owner=owner))
+                except (AllianceError, GameError) as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:oally":
+                allies = await game.alliances.list_active()
+                lines = [f"🌐 اتحادهای فعال: {len(allies)}"]
+                rows = []
+                for a in allies[:30]:
+                    mems = await game.alliances.members(a["id"])
+                    lines.append(
+                        f"#{a['id']} {a['name']} | {len(mems)}/{a['max_members']} | خزانه {int(float(a['treasury'])):,}"
+                    )
+                    rows.append([
+                        (f"جزئیات {a['name']}", f"ng:oallyv:{a['id']}"),
+                        (f"منحل #{a['id']}", f"ng:oallyd:{a['id']}"),
+                    ])
+                rows.append(back_row())
+                await out("\n".join(lines), ik(rows))
+                return
+            if data.startswith("ng:oallyv:"):
+                aid = int(data.split(":")[-1])
+                a = await game.alliances.get(aid)
+                if not a:
+                    await out("نیست")
+                    return
+                mems = await game.alliances.members(aid)
+                labels = {m["country_code"]: await game.country_label(m["country_code"]) for m in mems}
+                await out(game.alliances.card_text(a, mems, labels))
+                return
+            if data.startswith("ng:oallyd:"):
+                try:
+                    await out(await game.alliances.dissolve(pid, int(data.split(":")[-1]), is_owner=True))
+                except (AllianceError, GameError) as e:
+                    await out(f"❌ {e}")
+                return
+
 
             if data.startswith("ng:claim:"):
                 try:
@@ -1029,157 +1212,11 @@ def register_handlers(bot, app_ctx: dict):
                 await out("تعداد را بنویسید:")
                 return
 
-            # peace
-            if data == "ng:peace:menu":
-                rows = [
-                    [("ارسال درخواست", "ng:peace:new"), ("ورودی‌ها", "ng:peace:inbox")],
-                    [("فعال", "ng:peace:active")],
-                    back_row(),
-                ]
-                await out("🕊 مدیریت صلح", ik(rows))
-                return
-            if data == "ng:peace:new":
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                countries = [c for c in await game.list_countries() if c["country_code"] != code]
-                rows = []
-                for c in countries:
-                    rows.append([(f"{c['name_fa']} — ۶س", f"ng:peaceq:{c['country_code']}:6")])
-                    rows.append([(f"{c['name_fa']} — ۱۲س", f"ng:peaceq:{c['country_code']}:12")])
-                rows.append(back_row())
-                await out("کشور و مدت صلح:", ik(rows))
-                return
-            if data.startswith("ng:peaceq:"):
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                _, _, dst, hours = data.split(":")
-                try:
-                    await out(await game.peace_request(code, dst, float(hours), pid))
-                except GameError as e:
-                    await out(f"❌ {e}")
-                return
-            if data == "ng:peace:inbox":
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                pend = await game.pending_peace_for(code)
-                rows = []
-                lines = ["درخواست‌های صلح"]
-                for p in pend:
-                    lines.append(f"#{p['id']} {p['country_a']}↔{p['country_b']} ({p['duration_hours']}س)")
-                    if p["country_b"] == code or p["country_a"] == code:
-                        rows.append([
-                            (f"✅ قبول #{p['id']}", f"ng:peaceok:{p['id']}"),
-                            (f"❌ رد #{p['id']}", f"ng:peaceno:{p['id']}"),
-                        ])
-                rows.append(back_row())
-                await out("\n".join(lines), ik(rows))
-                return
-            if data == "ng:peace:active":
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                act = await game.active_peace_for(code)
-                lines = ["پیمان‌های فعال"]
-                rows = []
-                for p in act:
-                    lines.append(f"#{p['id']} {p['country_a']}↔{p['country_b']} تا {p.get('ends_at')}")
-                    rows.append([(f"پایان پیمان #{p['id']}", f"ng:peacebrk:{p['id']}")])
-                rows.append(back_row())
-                await out("\n".join(lines) if act else "پیمان فعالی نیست", ik(rows))
-                return
-            if data.startswith("ng:peaceok:"):
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                try:
-                    await out(await game.peace_accept(int(data.split(":")[-1]), code, pid))
-                except GameError as e:
-                    await out(f"❌ {e}")
-                return
-            if data.startswith("ng:peaceno:"):
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                try:
-                    await out(await game.peace_reject(int(data.split(":")[-1]), code))
-                except GameError as e:
-                    await out(f"❌ {e}")
-                return
-            if data.startswith("ng:peacebrk:"):
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                try:
-                    await out(await game.peace_break(int(data.split(":")[-1]), code, pid))
-                except GameError as e:
-                    await out(f"❌ {e}")
+            # peace removed — redirect to alliances
+            if data.startswith("ng:peace"):
+                await out("پیمان صلح حذف شده. از منوی 🤝 اتحادها استفاده کنید.")
                 return
 
-
-            if data == "ng:atkmenu":
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                ok, reason = await game.can_attack(code)
-                if not ok:
-                    await out(f"❌ {reason}")
-                    return
-                countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
-                rows = [[(f"{c['flag']} {c['name_fa']}", f"ng:atk:{c['country_code']}")] for c in countries]
-                rows.append(back_row())
-                await out("⚔️ هدف حمله نظامی:", ik(rows) if countries else main_kb(owner))
-                return
-            if data == "ng:cyber":
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
-                rows = [[(f"{c['flag']} {c['name_fa']}", f"ng:cybertgt:{c['country_code']}")] for c in countries]
-                rows.append(back_row())
-                await out("💻 کشور هدف عملیات سایبری:", ik(rows) if countries else main_kb(owner))
-                return
-            if data.startswith("ng:cybertgt:"):
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                tgt = data.split(":")[-1]
-                label = await game.country_label(tgt)
-                rows = [
-                    [("🛡 هکر پدافند", f"ng:cyberdef:{tgt}")],
-                    [("💰 هکر دارایی", f"ng:cyberasset:{tgt}")],
-                    back_row(),
-                ]
-                await out(f"💻 عملیات سایبری علیه {label}:", ik(rows))
-                return
-            if data.startswith("ng:cyberdef:"):
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                tgt = data.split(":")[-1]
-                try:
-                    await out(await game.hack_defense(code, tgt, pid))
-                except GameError as e:
-                    await out(f"❌ {e}")
-                return
-            if data.startswith("ng:cyberasset:"):
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                tgt = data.split(":")[-1]
-                try:
-                    await out(await game.hack_assets(code, tgt, pid))
-                except GameError as e:
-                    await out(f"❌ {e}")
-                return
-            if data == "ng:mydef":
-                if not code:
-                    await out("کشور ندارید")
-                    return
-                await out(await game.cyber_status_text(code))
-                return
 
             # attack
             if data.startswith("ng:atk:"):
