@@ -236,6 +236,40 @@ def register_handlers(bot, app_ctx: dict):
                 return
             owner = game.is_owner(pid)
             # owner panel commands only
+            # Direct money ops (bypass pending — more reliable)
+            if owner and (text.startswith("/give ") or text.startswith("پول ")):
+                try:
+                    parts = text.split()
+                    if len(parts) < 3:
+                        await reply(message, "فرمت:\n/give شناسه مبلغ\nیا:\nپول شناسه مبلغ\nمثال: پول 123456 5000000")
+                        return
+                    tid = int(float(str(parts[1]).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))))
+                    amount = game.parse_money_amount(parts[2])
+                    msg = await game.admin_give_to_player(pid, tid, amount)
+                    await reply(message, msg, main_kb(True))
+                except GameError as e:
+                    await reply(message, f"❌ {e}")
+                except Exception:
+                    log.exception("direct give")
+                    await reply(message, "❌ خطا در واریز")
+                return
+            if owner and (text.startswith("/take ") or text.startswith("برداشت ")):
+                try:
+                    parts = text.split()
+                    if len(parts) < 3:
+                        await reply(message, "فرمت:\n/take شناسه مبلغ\nمثال: /take 123456 1000000")
+                        return
+                    tid = int(float(str(parts[1]).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))))
+                    amount = game.parse_money_amount(parts[2])
+                    msg = await game.admin_take_from_player(pid, tid, amount)
+                    await reply(message, msg, main_kb(True))
+                except GameError as e:
+                    await reply(message, f"❌ {e}")
+                except Exception:
+                    log.exception("direct take")
+                    await reply(message, "❌ خطا در برداشت")
+                return
+
             if text in ("/admin", "/owner", "/panel"):
                 if not owner:
                     await reply(message, "❌ دسترسی مجاز نیست.")

@@ -16,6 +16,7 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger("worldwar")
+
 # quiet noisy libraries
 for name in ("httpx", "httpcore", "asyncio", "bale", "aiohttp"):
     logging.getLogger(name).setLevel(logging.WARNING)
@@ -120,6 +121,10 @@ async def async_main() -> None:
     for name in ("httpx", "httpcore", "asyncio", "bale", "aiohttp"):
         logging.getLogger(name).setLevel(logging.WARNING)
     db = await create_database(settings)
+    log.info("DATABASE_MODE=%s", settings.database_mode)
+    if settings.is_sqlite:
+        log.info("SQLite file: %s", settings.sqlite_path)
+
     try:
         if not await db.health_check():
             raise RuntimeError("DB health failed")
