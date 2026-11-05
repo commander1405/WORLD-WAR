@@ -569,27 +569,12 @@ def register_handlers(bot, app_ctx: dict):
                 if kind == "user_give_money":
                     try:
                         amount = game.parse_money_amount(text)
-                        if amount <= 0:
-                            raise GameError("برای افزودن پول، مبلغ باید مثبت باشد.")
-                        code = st.get("code")
-                        tid = st.get("tid")
-                        if not code and tid:
-                            p = await game.db.fetchrow(
-                                "SELECT country_code FROM ng_players WHERE player_id=$1", (int(tid),)
-                            )
-                            code = (p or {}).get("country_code")
-                        if not code:
+                        tid = int(st.get("tid") or 0)
+                        if not tid:
                             _pending.pop(pid, None)
-                            await reply(message, "❌ کشور این کاربر مشخص نیست.", main_kb(owner))
+                            await reply(message, "❌ شناسه بازیکن نامعتبر", main_kb(owner))
                             return
-                        # re-resolve country to avoid stale code
-                        if tid:
-                            p2 = await game.db.fetchrow(
-                                "SELECT country_code FROM ng_players WHERE player_id=$1", (int(tid),)
-                            )
-                            if p2 and p2.get("country_code"):
-                                code = p2["country_code"]
-                        msg = await game.admin_money(pid, code, amount)
+                        msg = await game.admin_give_to_player(pid, tid, amount)
                         _pending.pop(pid, None)
                         await reply(message, msg, main_kb(owner))
                     except GameError as e:
@@ -601,21 +586,12 @@ def register_handlers(bot, app_ctx: dict):
                 if kind == "user_take_money":
                     try:
                         amount = game.parse_money_amount(text)
-                        if amount <= 0:
-                            raise GameError("مبلغ باید مثبت باشد.")
-                        code = st.get("code")
-                        tid = st.get("tid")
-                        if tid:
-                            p2 = await game.db.fetchrow(
-                                "SELECT country_code FROM ng_players WHERE player_id=$1", (int(tid),)
-                            )
-                            if p2 and p2.get("country_code"):
-                                code = p2["country_code"]
-                        if not code:
+                        tid = int(st.get("tid") or 0)
+                        if not tid:
                             _pending.pop(pid, None)
-                            await reply(message, "❌ کشور نامشخص", main_kb(owner))
+                            await reply(message, "❌ شناسه بازیکن نامعتبر", main_kb(owner))
                             return
-                        msg = await game.admin_take_money(pid, code, amount)
+                        msg = await game.admin_take_from_player(pid, tid, amount)
                         _pending.pop(pid, None)
                         await reply(message, msg, main_kb(owner))
                     except GameError as e:
@@ -2213,14 +2189,19 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:oum:"):
                 tid = int(data.split(":")[-1])
-                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
-                code = (p or {}).get("country_code")
+                code = await game.resolve_country_for_player(tid)
                 if not code:
-                    await out("کشور نامشخص")
+                    await out("کشور نامشخص / مالکیت هم‌خوان نیست")
                     return
-                c = await game.db.fetchrow("SELECT treasury, currency_name_fa FROM ng_countries WHERE country_code=$1", (code,))
+                c = await game.db.fetchrow(
+                    "SELECT treasury, currency_name_fa, owner_player_id FROM ng_countries WHERE country_code=$1",
+                    (code,),
+                )
                 cname = await game.country_label(code)
-                await out(f"💰 موجودی {cname}: {int(float(c['treasury'])):,} {c.get('currency_name_fa') or ''}")
+                await out(
+                    f"💰 موجودی {cname}\nکد: {code}\nمالک: {c.get('owner_player_id')}\n"
+                    f"خزانه: {int(float(c['treasury'])):,} {c.get('currency_name_fa') or ''}"
+                )
                 return
             if data.startswith("ng:ounpt:"):
                 tid = int(data.split(":")[-1])
@@ -2259,13 +2240,12 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:ougive:"):
                 tid = int(data.split(":")[-1])
-                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
-                code = (p or {}).get("country_code")
+                code = await game.resolve_country_for_player(tid)
                 if not code:
-                    await out("این کاربر کشور ندارد؛ اول باید کشور انتخاب کند.")
+                    await out("این کاربر کشور معتبری ندارد؛ اول باید کشور انتخاب کند.")
                     return
                 c = await game.db.fetchrow(
-                    "SELECT treasury, name_fa, currency_name_fa FROM ng_countries WHERE country_code=$1",
+                    "SELECT treasury, name_fa, currency_name_fa, owner_player_id FROM ng_countries WHERE country_code=$1",
                     (code,),
                 )
                 _pending[pid] = {"kind": "user_give_money", "code": code, "tid": tid}
@@ -2278,13 +2258,12 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:outake:"):
                 tid = int(data.split(":")[-1])
-                p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
-                code = (p or {}).get("country_code")
+                code = await game.resolve_country_for_player(tid)
                 if not code:
-                    await out("این کاربر کشور ندارد.")
+                    await out("این کاربر کشور معتبری ندارد.")
                     return
                 c = await game.db.fetchrow(
-                    "SELECT treasury, name_fa FROM ng_countries WHERE country_code=$1", (code,)
+                    "SELECT treasury, name_fa, owner_player_id FROM ng_countries WHERE country_code=$1", (code,)
                 )
                 _pending[pid] = {"kind": "user_take_money", "code": code, "tid": tid}
                 await out(

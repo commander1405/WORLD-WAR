@@ -689,3 +689,39 @@ def test_owner_shop_price_and_discount(tmp_path):
         assert create_cost(20, 5_000_000_000) <= 7_000_000
         await db.close()
     run(_t())
+
+
+def test_admin_give_take_money_persists(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "fin", owner=1)
+        await g.claim(10, "US")
+        # split-brain: wrong cache on player
+        await db.execute("UPDATE ng_players SET country_code=$1 WHERE player_id=$2", ("DE", 10))
+        # but ownership is US
+        code = await g.resolve_country_for_player(10)
+        assert code == "US"
+        await db.execute("UPDATE ng_countries SET treasury=$1 WHERE country_code=$2", (100_000_000, "US"))
+        msg = await g.admin_give_to_player(1, 10, 20_000_000)
+        assert "120" in msg.replace(",", "") or "120000000" in msg.replace(",", "")
+        row = await db.fetchrow("SELECT treasury, owner_player_id FROM ng_countries WHERE country_code=$1", ("US",))
+        assert int(row["owner_player_id"]) == 10
+        assert abs(float(row["treasury"]) - 120_000_000) < 1
+        # take
+        await g.admin_take_from_player(1, 10, 30_000_000)
+        row = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", ("US",))
+        assert abs(float(row["treasury"]) - 90_000_000) < 1
+        # overdraft
+        try:
+            await g.admin_take_from_player(1, 10, 999_000_000)
+            assert False, "should fail"
+        except GameError:
+            pass
+        row = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", ("US",))
+        assert abs(float(row["treasury"]) - 90_000_000) < 1
+        # restart simulation: new Game same db
+        g2 = Game(db, owner_id=1)
+        await g2.bootstrap()
+        row = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", ("US",))
+        assert abs(float(row["treasury"]) - 90_000_000) < 1
+        await db.close()
+    run(_t())
