@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from database.interface import Database
 from modules.ng.catalog import CATALOG, CAT_FA
+from modules.ng.alliances import AllianceService, AllianceError, create_cost, DESTROY_WAIT_SEC
 
 log = logging.getLogger(__name__)
 TEHRAN = ZoneInfo("Asia/Tehran")
@@ -28,6 +29,7 @@ class Game:
         self.owner_id = owner_id
         self.group_id = group_id
         self._cat = {c["item_code"]: c for c in CATALOG}
+        self.alliances = AllianceService(self)
 
     # ---------- bootstrap ----------
     async def bootstrap(self) -> None:
@@ -233,7 +235,7 @@ class Game:
         if cd:
             try:
                 if datetime.now(timezone.utc) < datetime.fromisoformat(cd.replace("Z", "+00:00")):
-                    raise GameError("کشور شما نابود شده است. تا ۲ روز آینده امکان انتخاب کشور جدید ندارید.")
+                    raise GameError("کشور شما نابود شده است. تا ۳۰ دقیقه امکان انتخاب کشور جدید ندارید.")
             except GameError:
                 raise
             except Exception:
@@ -268,7 +270,16 @@ class Game:
         return await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
 
     # ---------- economy / shop ----------
+    async def effective_shop_multiplier(self, pid: int, country: dict) -> float:
+        m = self.shop_price_multiplier(country)
+        try:
+            m *= await self.alliances.shop_mult_for_player(pid)
+        except Exception:
+            pass
+        return m
+
     def shop_price_multiplier(self, country: dict) -> float:
+
         pen = country.get("peace_penalty_until")
         if not pen:
             return 1.0
@@ -300,7 +311,7 @@ class Game:
 
     async def cart_view(self, pid: int, country_code: str) -> tuple[str, float, list]:
         c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (country_code,))
-        mult = self.shop_price_multiplier(c or {})
+        mult = await self.effective_shop_multiplier(pid, c or {})
         rows = await self.db.fetch("SELECT * FROM ng_cart WHERE player_id=$1", (pid,))
         total = 0.0
         items = []
@@ -1170,7 +1181,7 @@ class Game:
                 )
                 prev = d_row.get("owner_player_id")
                 if prev:
-                    until = (now + timedelta(hours=48)).isoformat()
+                    until = (now + timedelta(seconds=DESTROY_WAIT_SEC)).isoformat()
                     await tx.execute(
                         "UPDATE ng_players SET country_code=NULL, destroy_cooldown_until=$1 WHERE player_id=$2",
                         (until, int(prev)),
@@ -1191,7 +1202,14 @@ class Game:
         await self.log_activity("attack", report.replace("\n", " | "), attacker, pid)
         await self.broadcast_log("attack", report)
         if new_hp <= 0:
+            await self.alliances.on_country_destroyed(defender)
             await self.broadcast_log("destroy", f"💥 کشور {def_name} نابود شد.")
+        try:
+            warn = await self.alliances.check_betrayal_on_attack(pid, attacker, defender)
+            if warn:
+                report = report + "\n\n" + warn
+        except Exception:
+            pass
         return report
 
     async def _tx_log_activity(self, tx, kind, summary, country=None, player_id=None):
@@ -1365,7 +1383,7 @@ class Game:
         tables = [
             "ng_cart","ng_market","ng_peace","ng_statements","ng_daily_payouts",
             "ng_activity","ng_admin_log","ng_buildings","ng_inventory","ng_players",
-            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode","ng_finance_ledger","ng_player_activity","ng_cyber_effects","ng_referrals",
+            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode","ng_finance_ledger","ng_player_activity","ng_cyber_effects","ng_referrals","ng_alliances","ng_alliance_members","ng_alliance_tx","ng_alliance_exits","ng_player_flags",
         ]
         async with self.db.transaction() as tx:
             for t in tables:
@@ -2595,7 +2613,7 @@ class Game:
                     (defender,),
                 )
                 if prev:
-                    until = (now + timedelta(hours=48)).isoformat()
+                    until = (now + timedelta(seconds=DESTROY_WAIT_SEC)).isoformat()
                     await tx.execute(
                         "UPDATE ng_players SET country_code=NULL, destroy_cooldown_until=$1 WHERE player_id=$2",
                         (until, int(prev)),
@@ -2613,6 +2631,7 @@ class Game:
         await self.log_activity("attack", report.replace("\n", " | "), attacker, pid)
         await self.broadcast_log("attack", report)
         if new_hp <= 0:
+            await self.alliances.on_country_destroyed(defender)
             await self.broadcast_log("destroy", f"💥 کشور {def_name} در اثر حمله اتمی نابود شد.")
         return report
 
@@ -2920,9 +2939,7 @@ class Game:
 
     # ---------- alliances (active peace) ----------
     async def list_alliances(self) -> list[dict]:
-        return await self.db.fetch(
-            "SELECT * FROM ng_peace WHERE status='active' ORDER BY id DESC"
-        )
+        return await self.alliances.list_active()
 
     async def alliance_detail_text(self, peace_id: int) -> str:
         p = await self.db.fetchrow("SELECT * FROM ng_peace WHERE id=$1", (peace_id,))

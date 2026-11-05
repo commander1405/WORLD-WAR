@@ -538,3 +538,44 @@ def test_daily_grant_and_referral_and_away(tmp_path):
         assert any(int(a["id"]) == pid for a in allies)
         await db.close()
     run(_t())
+
+
+def test_alliance_system_v2(tmp_path):
+    async def _t():
+        from modules.ng.alliances import create_cost, AllianceError
+        db, g = await boot(tmp_path / "ally", owner=1)
+        await g.claim(10, "US")
+        await g.claim(11, "DE")
+        await db.execute("UPDATE ng_countries SET treasury=500000000 WHERE country_code IN ('US','DE')")
+        cost = create_cost(5, 200_000_000)
+        assert cost >= 120_000_000
+        msg = await g.alliances.create(10, "US", "Dark Alliance", 5, 200_000_000)
+        assert "ساخته" in msg or "✅" in msg
+        mem = await g.alliances.member_of("US")
+        assert mem and mem["role"] == "founder"
+        await g.alliances.join(11, "DE", mem["alliance_id"])
+        assert await g.alliances.member_of("DE")
+        try:
+            await g.alliances.create(11, "DE", "Other", 3, 100_000_000)
+            assert False
+        except AllianceError:
+            pass
+        await g.alliances.deposit(11, "DE", 1_000_000)
+        a = await g.alliances.get(mem["alliance_id"])
+        assert float(a["treasury"]) >= 1_000_000
+        await g.alliances.equal_split(10)
+        a2 = await g.alliances.get(mem["alliance_id"])
+        assert float(a2["treasury"]) < float(a["treasury"])
+        await g.alliances.leave(11, "DE")
+        # betrayal: attack US within window
+        await db.execute("UPDATE world_meta SET war_enabled=1 WHERE id=1")
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('DE','g_inf',20)"
+        )
+        # re-claim DE still has country
+        warn = await g.alliances.check_betrayal_on_attack(11, "DE", "US")
+        assert warn and "خیانت" in warn
+        mult = await g.alliances.shop_mult_for_player(11)
+        assert mult == 2.0
+        await db.close()
+    run(_t())

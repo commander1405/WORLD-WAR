@@ -12,6 +12,7 @@ from bale import (
 from modules.ng.catalog import CATALOG, CAT_FA, items_in_category
 from modules.ng.guide import guide_menu_rows, guide_page, GUIDE_SECTIONS
 from modules.ng.game import GameError
+from modules.ng.alliances import AllianceError, create_cost, RENAME_COST
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ BTN_WORKSHOP = "🏭 کارگاه"
 BTN_ABOUT = "ℹ️ درباره ما"
 BTN_GUIDE = "📖 راهنمای بازی"
 BTN_REF = "🎁 دعوت کردن"
+BTN_ALLY = "🤝 اتحادها"
 BTN_TREATY = "⚖ پیمان‌ها"
 
 _pending: dict[int, dict] = {}
@@ -41,7 +43,7 @@ _pending: dict[int, dict] = {}
 def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
     kb = MenuKeyboardMarkup()
     rows = [
-        [BTN_REF],
+        [BTN_REF, BTN_ALLY],
         [BTN_MY, BTN_ECO],
         [BTN_WORKSHOP, BTN_SHOP],
         [BTN_INV, BTN_MKT],
@@ -226,7 +228,7 @@ def register_handlers(bot, app_ctx: dict):
                     return
                 rows = [
                     [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
-                    [("🤝 مدیریت اتحادها", "ng:oally"), ("📊 آمار دعوت", "ng:orefstats")],
+                    [("🌐 مدیریت اتحادها", "ng:oally"), ("📊 آمار دعوت", "ng:orefstats")],
                     [("جنگ باز", "ng:owar:1"), ("جنگ بسته", "ng:owar:0")],
                     [("هسته‌ای فعال", "ng:onuke:1"), ("هسته‌ای خاموش", "ng:onuke:0")],
                     [("بیانیه‌ها", "ng:ostmt"), ("درخواست‌های NPT", "ng:onpt")],
@@ -251,6 +253,91 @@ def register_handlers(bot, app_ctx: dict):
             if pid in _pending:
                 st = _pending[pid]
                 kind = st.get("kind")
+                if kind == "ally_name":
+                    st["name"] = text.strip()[:40]
+                    st["kind"] = "ally_members"
+                    await reply(message, "ظرفیت اعضا را وارد کنید (۲ تا ۲۰):", main_kb(owner))
+                    return
+                if kind == "ally_members":
+                    try:
+                        st["max_members"] = int(text.strip())
+                    except Exception:
+                        await reply(message, "عدد معتبر وارد کنید", main_kb(owner))
+                        return
+                    st["kind"] = "ally_cap"
+                    await reply(message, "ظرفیت خزانه را وارد کنید (مثلاً 500000000):", main_kb(owner))
+                    return
+                if kind == "ally_cap":
+                    try:
+                        st["treasury_cap"] = float(text.replace(",", "").strip())
+                    except Exception:
+                        await reply(message, "عدد معتبر وارد کنید", main_kb(owner))
+                        return
+                    name = st.get("name")
+                    mm = st.get("max_members", 2)
+                    tc = st.get("treasury_cap", 100000000)
+                    cost = create_cost(mm, tc)
+                    _pending[pid] = {**st, "kind": "ally_confirm"}
+                    rows = [[("✅ تأیید ساخت", "ng:acreateyes"), ("❌ انصراف", "ng:home")]]
+                    await reply(
+                        message,
+                        f"نام: {name}\nظرفیت اعضا: {mm}\nظرفیت خزانه: {int(tc):,}\nهزینه نهایی: {cost:,}\n\nتأیید می‌کنید؟",
+                        ik(rows),
+                    )
+                    return
+                if kind == "ally_confirm":
+                    await reply(message, "از دکمه‌های تأیید استفاده کنید.", main_kb(owner))
+                    return
+                if kind == "ally_deposit":
+                    _pending.pop(pid, None)
+                    try:
+                        msg = await game.alliances.deposit(pid, code, float(text.replace(",","")))
+                    except (AllianceError, GameError, ValueError) as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "ally_withdraw":
+                    _pending.pop(pid, None)
+                    try:
+                        msg = await game.alliances.withdraw(pid, float(text.replace(",","")))
+                    except (AllianceError, GameError, ValueError) as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "ally_rename":
+                    _pending.pop(pid, None)
+                    try:
+                        msg = await game.alliances.rename(pid, text.strip())
+                    except (AllianceError, GameError) as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "ally_emembers":
+                    _pending.pop(pid, None)
+                    try:
+                        msg = await game.alliances.expand_members(pid, int(text.strip()))
+                    except (AllianceError, GameError, ValueError) as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "ally_etreasury":
+                    _pending.pop(pid, None)
+                    try:
+                        msg = await game.alliances.expand_treasury(pid, float(text.replace(",","")))
+                    except (AllianceError, GameError, ValueError) as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "ally_pay":
+                    st["pay_country"] = st.get("pay_country")
+                    try:
+                        amount = float(text.replace(",",""))
+                        msg = await game.alliances.pay_member(pid, st["pay_country"], amount)
+                    except (AllianceError, GameError, ValueError, KeyError) as e:
+                        msg = f"❌ {e}"
+                    _pending.pop(pid, None)
+                    await reply(message, msg, main_kb(owner))
+                    return
                 if kind == "ref_code":
                     _pending.pop(pid, None)
                     try:
@@ -616,6 +703,38 @@ def register_handlers(bot, app_ctx: dict):
             if text == BTN_ABOUT:
                 about = await game.get_setting("about_message", game.DEFAULT_ABOUT)
                 await reply(message, about, main_kb(owner))
+                return
+
+
+            if text == BTN_ALLY:
+                if not code:
+                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    return
+                mem = await game.alliances.member_of(code)
+                if mem:
+                    a = await game.alliances.get(mem["alliance_id"])
+                    mems = await game.alliances.members(mem["alliance_id"])
+                    labels = {}
+                    for m in mems:
+                        labels[m["country_code"]] = await game.country_label(m["country_code"])
+                    text_a = game.alliances.card_text(a, mems, labels)
+                    rows = [
+                        [("👥 اعضا", f"ng:amembers:{a['id']}"), ("🏦 خزانه", f"ng:atreasure:{a['id']}")],
+                        [("🚪 خروج از اتحاد", "ng:aleave")],
+                    ]
+                    if mem.get("role") == "founder":
+                        rows.insert(1, [("⚙️ مدیریت", f"ng:amgmt:{a['id']}")])
+                        rows.insert(2, [("💸 تقسیم مساوی خزانه", "ng:asplit")])
+                    rows.append(back_row())
+                    await reply(message, text_a, ik(rows))
+                else:
+                    allies = await game.alliances.list_active()
+                    rows = [[(f"➕ ساخت اتحاد", "ng:acreate")]]
+                    for a in allies[:25]:
+                        mems = await game.alliances.members(a["id"])
+                        rows.append([(f"{a['name']} ({len(mems)}/{a['max_members']})", f"ng:aview:{a['id']}")])
+                    rows.append(back_row())
+                    await reply(message, "🤝 اتحادها — فهرست فعال یا ساخت اتحاد جدید:", ik(rows))
                 return
 
             if text == BTN_REF:
