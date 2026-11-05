@@ -523,14 +523,23 @@ def register_handlers(bot, app_ctx: dict):
                     await reply(message, msg, main_kb(owner))
                     return
                 if kind == "admin_money":
-                    _pending.pop(pid, None)
                     try:
-                        parts = text.split()
-                        ccode, amount = parts[0].upper(), float(parts[1])
+                        parts = text.replace("،", " ").replace(",", " ").split()
+                        if len(parts) < 2:
+                            await reply(message, "فرمت: کدکشور مبلغ\nمثال: IR 5000000", ik([cancel_row()]))
+                            return
+                        ccode = parts[0].upper()
+                        amount = game.parse_money_amount(parts[1])
                         msg = await game.admin_money(pid, ccode, amount)
-                    except Exception as e:
+                        _pending.pop(pid, None)
+                    except GameError as e:
                         msg = f"❌ {e}"
-                    await reply(message, msg, main_kb(owner))
+                    except Exception as e:
+                        log.exception("admin_money pending")
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner) if "موفق" in str(msg) or "✅" in str(msg) else None)
+                    if "✅" not in str(msg) and pid in _pending:
+                        await reply(message, "دوباره مبلغ را بفرستید یا لغو کنید.", ik([cancel_row()]))
                     return
                 if kind == "reset_phrase":
                     _pending.pop(pid, None)
@@ -558,23 +567,62 @@ def register_handlers(bot, app_ctx: dict):
                     await reply(message, msg, main_kb(owner))
                     return
                 if kind == "user_give_money":
-                    _pending.pop(pid, None)
                     try:
-                        amount = float(text.replace(",", "").replace("،", ""))
-                        code = st["code"]
+                        amount = game.parse_money_amount(text)
+                        if amount <= 0:
+                            raise GameError("برای افزودن پول، مبلغ باید مثبت باشد.")
+                        code = st.get("code")
+                        tid = st.get("tid")
+                        if not code and tid:
+                            p = await game.db.fetchrow(
+                                "SELECT country_code FROM ng_players WHERE player_id=$1", (int(tid),)
+                            )
+                            code = (p or {}).get("country_code")
+                        if not code:
+                            _pending.pop(pid, None)
+                            await reply(message, "❌ کشور این کاربر مشخص نیست.", main_kb(owner))
+                            return
+                        # re-resolve country to avoid stale code
+                        if tid:
+                            p2 = await game.db.fetchrow(
+                                "SELECT country_code FROM ng_players WHERE player_id=$1", (int(tid),)
+                            )
+                            if p2 and p2.get("country_code"):
+                                code = p2["country_code"]
                         msg = await game.admin_money(pid, code, amount)
-                    except (ValueError, GameError) as e:
-                        msg = f"❌ {e}"
-                    await reply(message, msg, main_kb(owner))
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(owner))
+                    except GameError as e:
+                        await reply(message, f"❌ {e}\nدوباره مبلغ را بفرستید یا لغو کنید.", ik([cancel_row()]))
+                    except Exception:
+                        log.exception("user_give_money")
+                        await reply(message, "❌ خطا در افزودن پول. دوباره تلاش کنید.", ik([cancel_row()]))
                     return
                 if kind == "user_take_money":
-                    _pending.pop(pid, None)
                     try:
-                        amount = float(text.replace(",", "").replace("،", ""))
-                        msg = await game.admin_take_money(pid, st["code"], amount)
-                    except (ValueError, GameError) as e:
-                        msg = f"❌ {e}"
-                    await reply(message, msg, main_kb(owner))
+                        amount = game.parse_money_amount(text)
+                        if amount <= 0:
+                            raise GameError("مبلغ باید مثبت باشد.")
+                        code = st.get("code")
+                        tid = st.get("tid")
+                        if tid:
+                            p2 = await game.db.fetchrow(
+                                "SELECT country_code FROM ng_players WHERE player_id=$1", (int(tid),)
+                            )
+                            if p2 and p2.get("country_code"):
+                                code = p2["country_code"]
+                        if not code:
+                            _pending.pop(pid, None)
+                            await reply(message, "❌ کشور نامشخص", main_kb(owner))
+                            return
+                        msg = await game.admin_take_money(pid, code, amount)
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(owner))
+                    except GameError as e:
+                        await reply(message, f"❌ {e}\nدوباره مبلغ را بفرستید.", ik([cancel_row()]))
+                    except Exception:
+                        log.exception("user_take_money")
+                        await reply(message, "❌ خطا در برداشت پول.", ik([cancel_row()]))
                     return
                 if kind == "user_tax":
                     _pending.pop(pid, None)
@@ -2214,20 +2262,37 @@ def register_handlers(bot, app_ctx: dict):
                 p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
                 code = (p or {}).get("country_code")
                 if not code:
-                    await out("کشور نامشخص")
+                    await out("این کاربر کشور ندارد؛ اول باید کشور انتخاب کند.")
                     return
-                _pending[pid] = {"kind": "user_give_money", "code": code}
-                await out("مبلغ افزودن پول را بنویسید:")
+                c = await game.db.fetchrow(
+                    "SELECT treasury, name_fa, currency_name_fa FROM ng_countries WHERE country_code=$1",
+                    (code,),
+                )
+                _pending[pid] = {"kind": "user_give_money", "code": code, "tid": tid}
+                await out(
+                    f"💵 افزودن پول به {(c or {}).get('name_fa') or code}\n"
+                    f"موجودی فعلی: {int(float((c or {}).get('treasury') or 0)):,}\n\n"
+                    f"مبلغ را به عدد بنویسید (مثال: 5000000):",
+                    ik([cancel_row()]),
+                )
                 return
             if data.startswith("ng:outake:"):
                 tid = int(data.split(":")[-1])
                 p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
                 code = (p or {}).get("country_code")
                 if not code:
-                    await out("کشور نامشخص")
+                    await out("این کاربر کشور ندارد.")
                     return
-                _pending[pid] = {"kind": "user_take_money", "code": code}
-                await out("مبلغ برداشت را بنویسید:")
+                c = await game.db.fetchrow(
+                    "SELECT treasury, name_fa FROM ng_countries WHERE country_code=$1", (code,)
+                )
+                _pending[pid] = {"kind": "user_take_money", "code": code, "tid": tid}
+                await out(
+                    f"💸 برداشت از {(c or {}).get('name_fa') or code}\n"
+                    f"موجودی فعلی: {int(float((c or {}).get('treasury') or 0)):,}\n\n"
+                    f"مبلغ برداشت را بنویسید:",
+                    ik([cancel_row()]),
+                )
                 return
             if data.startswith("ng:outax:"):
                 tid = int(data.split(":")[-1])

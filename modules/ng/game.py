@@ -1431,26 +1431,49 @@ class Game:
         )
         return "قابلیت هسته‌ای بازی فعال شد." if enabled else "قابلیت هسته‌ای بازی غیرفعال شد."
 
+    @staticmethod
+    def parse_money_amount(text: str) -> float:
+        """Parse amounts with Persian/Arabic digits and thousand separators."""
+        if text is None:
+            raise GameError("مبلغ نامعتبر است")
+        s = str(text).strip().replace(",", "").replace("،", "").replace(" ", "")
+        trans = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+        s = s.translate(trans)
+        if not s or s in {".", "+", "-"}:
+            raise GameError("مبلغ نامعتبر است")
+        try:
+            return float(s)
+        except ValueError as e:
+            raise GameError("مبلغ را به عدد بنویسید. مثال: 5000000") from e
+
     async def admin_money(self, actor: int, code: str, amount: float) -> str:
         if not self.is_owner(actor):
             raise GameError("مجاز نیستید")
         amount = float(amount)
         if amount == 0:
             raise GameError("مبلغ صفر نامعتبر است")
-        c = await self.db.fetchrow(
-            "SELECT treasury, name_fa, currency_name_fa FROM ng_countries WHERE country_code=$1",
-            (code,),
-        )
-        if not c:
-            raise GameError("کشور یافت نشد")
-        new_t = float(c["treasury"]) + amount
-        if new_t < 0:
-            raise GameError("موجودی کشور کافی نیست")
-        await self.db.execute(
-            "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-            (new_t, code),
-        )
-        await self.admin_log(actor, "money", f"{code} {amount:+}")
+        code = (code or "").strip().upper()
+        async with self.db.transaction() as tx:
+            c = await tx.fetchrow(
+                "SELECT country_code, treasury, name_fa, currency_name_fa, owner_player_id FROM ng_countries WHERE country_code=$1",
+                (code,),
+            )
+            if not c:
+                raise GameError("کشور یافت نشد")
+            before = float(c["treasury"] or 0)
+            new_t = before + amount
+            if new_t < 0:
+                raise GameError("موجودی کشور کافی نیست")
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (new_t, code),
+            )
+            check = await tx.fetchrow(
+                "SELECT treasury FROM ng_countries WHERE country_code=$1", (code,)
+            )
+            if check is None or abs(float(check["treasury"]) - new_t) > 0.01:
+                raise GameError("خطا در ذخیره موجودی؛ دوباره تلاش کنید.")
+        await self.admin_log(actor, "money", f"{code} {amount:+} -> {new_t}")
         try:
             await self.ledger_write(
                 "admin_money", abs(amount), actor,
@@ -1459,16 +1482,21 @@ class Game:
                 reason="مالک",
             )
         except Exception:
-            pass
+            log.exception("ledger admin_money")
         label = c.get("name_fa") or code
         cur = c.get("currency_name_fa") or ""
-        return (
-            f"✅ انتقال انجام شد.\n"
-            f"کشور: {label}\n"
-            f"تغییر: {int(amount):+,} {cur}\n"
-            f"موجودی جدید: {int(new_t):,} {cur}\n"
-            "(قابل خرج در فروشگاه)"
-        )
+        owner = c.get("owner_player_id")
+        owner_line = f"بازیکن مالک: {owner}" if owner else "بدون بازیکن"
+        lines = [
+            "✅ پول با موفقیت ثبت شد.",
+            f"کشور: {label}",
+            owner_line,
+            f"قبل: {int(before):,} {cur}",
+            f"تغییر: {int(amount):+,} {cur}",
+            f"موجودی جدید: {int(new_t):,} {cur}",
+            "(در «کشور من» و فروشگاه قابل مشاهده و خرج است)",
+        ]
+        return "\n".join(lines)
 
     async def full_reset(self, actor: int, confirm_phrase: str) -> str:
         if not self.is_owner(actor):
