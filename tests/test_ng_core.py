@@ -432,3 +432,13 @@ def test_country_label_and_player_reset(tmp_path):
         assert p2["country_code"] == "IR"
         await db.close()
     run(_t())
+
+
+def test_guide_content_structure():
+    from modules.ng.guide import GUIDE_SECTIONS, GUIDE_MENU_ORDER, guide_page, guide_menu_rows
+    assert len(GUIDE_SECTIONS) == 10
+    assert len(GUIDE_MENU_ORDER) == 10
+    text, rows = guide_page("faq", 0)
+    assert "سؤالات" in text or "متداول" in text
+    assert any("راهنما" in b[0] for row in rows for b in row)
+    assert guide_menu_rows()

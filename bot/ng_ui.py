@@ -10,6 +10,7 @@ from bale import (
     InlineKeyboardButton,
 )
 from modules.ng.catalog import CATALOG, CAT_FA
+from modules.ng.guide import guide_menu_rows, guide_page, GUIDE_SECTIONS
 from modules.ng.game import GameError
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ BTN_PICK = "🗺 انتخاب کشور"
 BTN_OWNER = "🛡 پنل مالک"
 BTN_WORKSHOP = "🏭 کارگاه"
 BTN_ABOUT = "ℹ️ درباره ما"
+BTN_GUIDE = "📖 راهنمای بازی"
 BTN_TREATY = "⚖ پیمان‌ها"
 
 _pending: dict[int, dict] = {}
@@ -45,7 +47,8 @@ def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
         [BTN_PEACE, BTN_TREATY],
         [BTN_ATTACK, BTN_STMT],
         [BTN_WORLD, BTN_REPORT],
-        [BTN_ABOUT, BTN_PICK],
+        [BTN_ABOUT, BTN_GUIDE],
+        [BTN_PICK],
     ]
     for i, row in enumerate(rows, 1):
         for t in row:
@@ -234,7 +237,7 @@ def register_handlers(bot, app_ctx: dict):
                 ]
                 await reply(message, "🛡 پنل مالک / سازمان ملل\nدستورات: /admin /owner /panel", ik(rows))
                 return
-            if text not in ("/start", "شروع", "منو", "menu") and text != BTN_ABOUT:
+            if text not in ("/start", "شروع", "منو", "menu") and text not in (BTN_ABOUT, BTN_GUIDE):
                 if not await require_membership(pid, message, False):
                     return
             owner = game.is_owner(pid)
@@ -587,6 +590,15 @@ def register_handlers(bot, app_ctx: dict):
                 await reply(message, about, main_kb(owner))
                 return
 
+            if text == BTN_GUIDE:
+                rows = guide_menu_rows()
+                await reply(
+                    message,
+                    "📖 راهنمای بازی\n\nبخش موردنظر را انتخاب کنید. همه توضیحات بر اساس امکانات واقعی بازی نوشته شده‌اند.",
+                    ik(rows),
+                )
+                return
+
             if text == BTN_TREATY:
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
@@ -625,18 +637,35 @@ def register_handlers(bot, app_ctx: dict):
                 return
             owner = game.is_owner(pid)
             code = await game.player_country(pid)
+
             msg = getattr(cq, "message", None)
 
             async def out(text, kb=None):
                 if msg is not None:
                     await msg.reply(str(text)[:3500], components=kb or main_kb(owner))
 
+
+            if data == "ng:guide" or data.startswith("ng:guide:"):
+                if data == "ng:guide":
+                    rows = guide_menu_rows()
+                    await out(
+                        "📖 راهنمای بازی\n\nبخش موردنظر را انتخاب کنید.",
+                        ik(rows),
+                    )
+                    return
+                parts = data.split(":")
+                section = parts[2] if len(parts) > 2 else ""
+                page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                text, rows = guide_page(section, page)
+                await out(text, ik(rows))
+                return
+
             # owner callbacks — server-side authorization
             if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
-            elif data not in ("ng:home", "ng:joincheck") and not data.startswith("ng:joinlink"):
+            elif data not in ("ng:home", "ng:joincheck", "ng:guide") and not data.startswith("ng:joinlink") and not data.startswith("ng:guide:"):
                 if not await require_membership(pid, cq, True):
                     return
 

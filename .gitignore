@@ -12,5 +12,3 @@ db/*.db-*
 .idea/
 .vscode/
 
-# local secrets (never commit real tokens)
-config.py
