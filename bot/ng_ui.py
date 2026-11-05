@@ -73,6 +73,18 @@ def back_row():
     return [("🔙 بازگشت", "ng:home")]
 
 
+def cancel_row():
+    return [("❌ انصراف", "ng:cancel"), ("🔙 منوی اصلی", "ng:home")]
+
+
+MENU_TEXTS = {
+    BTN_MY, BTN_ECO, BTN_SHOP, BTN_INV, BTN_MKT, BTN_TRADE, BTN_DIPLO,
+    BTN_PEACE, BTN_ATTACK, BTN_STMT, BTN_WORLD, BTN_REPORT, BTN_PICK,
+    BTN_OWNER, BTN_WORKSHOP, BTN_ABOUT, BTN_GUIDE, BTN_REF, BTN_ALLY, BTN_TREATY,
+    "/start", "شروع", "منو", "menu", "/admin", "/owner", "/panel",
+}
+
+
 async def create_bot(token: str):
     from bale import Bot
     return Bot(token)
@@ -253,42 +265,99 @@ def register_handlers(bot, app_ctx: dict):
             if pid in _pending:
                 st = _pending[pid]
                 kind = st.get("kind")
-                if kind == "ally_name":
-                    st["name"] = text.strip()[:40]
+                # cancel pending if user pressed a main menu button
+                if text in MENU_TEXTS or (text.startswith("/") and kind and kind.startswith("ally")):
+                    _pending.pop(pid, None)
+                    # fall through to normal menu handling below
+                elif kind == "ally_name":
+                    name = text.strip()[:40]
+                    if len(name) < 3:
+                        await reply(
+                            message,
+                            "نام اتحاد حداقل ۳ حرف باشد.\nدوباره بنویسید:",
+                            ik([cancel_row()]),
+                        )
+                        return
+                    st["name"] = name
                     st["kind"] = "ally_members"
-                    await reply(message, "ظرفیت اعضا را وارد کنید (۲ تا ۲۰):", main_kb(owner))
-                    return
-                if kind == "ally_members":
-                    try:
-                        st["max_members"] = int(text.strip())
-                    except Exception:
-                        await reply(message, "عدد معتبر وارد کنید", main_kb(owner))
-                        return
-                    st["kind"] = "ally_cap"
-                    await reply(message, "ظرفیت خزانه را وارد کنید (مثلاً 500000000):", main_kb(owner))
-                    return
-                if kind == "ally_cap":
-                    try:
-                        st["treasury_cap"] = float(text.replace(",", "").strip())
-                    except Exception:
-                        await reply(message, "عدد معتبر وارد کنید", main_kb(owner))
-                        return
-                    name = st.get("name")
-                    mm = st.get("max_members", 2)
-                    tc = st.get("treasury_cap", 100000000)
-                    cost = create_cost(mm, tc)
-                    _pending[pid] = {**st, "kind": "ally_confirm"}
-                    rows = [[("✅ تأیید ساخت", "ng:acreateyes"), ("❌ انصراف", "ng:home")]]
+                    _pending[pid] = dict(st)
                     await reply(
                         message,
-                        f"نام: {name}\nظرفیت اعضا: {mm}\nظرفیت خزانه: {int(tc):,}\nهزینه نهایی: {cost:,}\n\nتأیید می‌کنید؟",
+                        f"نام: {name}\n\nظرفیت اعضا را وارد کنید (عدد بین ۲ تا ۲۰):",
+                        ik([cancel_row()]),
+                    )
+                    return
+                elif kind == "ally_members":
+                    try:
+                        mm = int(text.strip().replace(",", "").replace("،", ""))
+                    except Exception:
+                        await reply(message, "فقط عدد وارد کنید (۲ تا ۲۰):", ik([cancel_row()]))
+                        return
+                    if mm < 2 or mm > 20:
+                        await reply(message, "ظرفیت اعضا باید بین ۲ تا ۲۰ باشد:", ik([cancel_row()]))
+                        return
+                    st["max_members"] = mm
+                    st["kind"] = "ally_cap"
+                    _pending[pid] = dict(st)
+                    await reply(
+                        message,
+                        f"ظرفیت اعضا: {mm}\n\nظرفیت خزانه را وارد کنید (مثلاً 100000000):",
+                        ik([cancel_row()]),
+                    )
+                    return
+                elif kind == "ally_cap":
+                    raw = text.replace(",", "").replace("،", "").replace(" ", "").strip()
+                    try:
+                        tc = float(raw)
+                    except Exception:
+                        await reply(message, "عدد معتبر برای ظرفیت خزانه وارد کنید:", ik([cancel_row()]))
+                        return
+                    if tc < 50_000_000:
+                        await reply(message, "حداقل ظرفیت خزانه ۵۰٬۰۰۰٬۰۰۰ است:", ik([cancel_row()]))
+                        return
+                    st["treasury_cap"] = tc
+                    name = st.get("name") or "?"
+                    mm = int(st.get("max_members") or 2)
+                    cost = create_cost(mm, tc)
+                    st["kind"] = "ally_confirm"
+                    st["cost"] = cost
+                    _pending[pid] = dict(st)
+                    rows = [
+                        [("✅ تأیید و ساخت اتحاد", "ng:acreateyes")],
+                        cancel_row(),
+                    ]
+                    preview = (
+                        "📋 پیش‌نمایش اتحاد\n\n"
+                        f"نام: {name}\n"
+                        f"ظرفیت اعضا: {mm}\n"
+                        f"ظرفیت خزانه: {int(tc):,}\n"
+                        f"هزینه نهایی: {cost:,}\n\n"
+                        "اگر درست است «تأیید و ساخت اتحاد» را بزنید."
+                    )
+                    await reply(message, preview, ik(rows))
+                    return
+                elif kind == "ally_confirm":
+                    name = st.get("name") or "?"
+                    mm = int(st.get("max_members") or 2)
+                    tc = float(st.get("treasury_cap") or 100_000_000)
+                    cost = int(st.get("cost") or create_cost(mm, tc))
+                    rows = [
+                        [("✅ تأیید و ساخت اتحاد", "ng:acreateyes")],
+                        cancel_row(),
+                    ]
+                    await reply(
+                        message,
+                        (
+                            "لطفاً از دکمه‌ها استفاده کنید.\n\n"
+                            f"نام: {name}\n"
+                            f"ظرفیت: {mm}\n"
+                            f"خزانه: {int(tc):,}\n"
+                            f"هزینه: {cost:,}"
+                        ),
                         ik(rows),
                     )
                     return
-                if kind == "ally_confirm":
-                    await reply(message, "از دکمه‌های تأیید استفاده کنید.", main_kb(owner))
-                    return
-                if kind == "ally_deposit":
+                elif kind == "ally_deposit":
                     _pending.pop(pid, None)
                     try:
                         msg = await game.alliances.deposit(pid, code, float(text.replace(",","")))
@@ -499,6 +568,7 @@ def register_handlers(bot, app_ctx: dict):
 
             # ---- main menu ----
             if text in ("/start", "شروع", "منو", "menu"):
+                _pending.pop(pid, None)
                 try:
                     await game.record_start(pid)
                 except Exception:
@@ -726,7 +796,7 @@ def register_handlers(bot, app_ctx: dict):
                     await reply(message, text_a, ik(rows))
                 else:
                     allies = await game.alliances.list_active()
-                    rows = [[(f"➕ ساخت اتحاد", "ng:acreate")]]
+                    rows = [[("➕ ساخت اتحاد", "ng:acreate")]]
                     for a in allies[:25]:
                         mems = await game.alliances.members(a["id"])
                         rows.append([(f"{a['name']} ({len(mems)}/{a['max_members']})", f"ng:aview:{a['id']}")])
@@ -819,45 +889,75 @@ def register_handlers(bot, app_ctx: dict):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
-            elif data not in ("ng:home", "ng:joincheck", "ng:guide") and not data.startswith("ng:joinlink") and not data.startswith("ng:guide:"):
+            elif data not in (
+                "ng:home", "ng:cancel", "ng:joincheck", "ng:guide",
+                "ng:acreate", "ng:acreateyes",
+            ) and not data.startswith("ng:joinlink") and not data.startswith("ng:guide:") and not data.startswith("ng:a"):
+                # ng:a* alliance flows allowed so user is not stuck mid-create
                 if not await require_membership(pid, cq, True):
                     return
 
-            if data in ("ng:home", "ng:busy"):
-                await out("منوی اصلی" if data == "ng:home" else "این کشور دارای بازیکن است.")
+            if data in ("ng:home", "ng:busy", "ng:cancel"):
+                _pending.pop(pid, None)
+                await out(
+                    "منوی اصلی — وضعیت قبلی لغو شد." if data != "ng:busy" else "این کشور دارای بازیکن است.",
+                    main_kb(owner),
+                )
                 return
 
             # ---- Alliance System 2.0 callbacks ----
             if data == "ng:acreate":
                 if not code:
-                    await out("ابتدا کشور انتخاب کنید.")
+                    await out("ابتدا کشور انتخاب کنید.", main_kb(owner))
                     return
                 if await game.alliances.member_of(code):
-                    await out("شما هم‌اکنون عضو یک اتحاد هستید.")
+                    await out("شما هم‌اکنون عضو یک اتحاد هستید.", main_kb(owner))
                     return
                 _pending[pid] = {"kind": "ally_name"}
-                await out("نام اتحاد را بنویسید:")
+                await out(
+                    "🏗 ساخت اتحاد\n\nنام اتحاد را بنویسید (حداقل ۳ حرف):",
+                    ik([cancel_row()]),
+                )
                 return
             if data == "ng:acreateyes":
-                st = _pending.pop(pid, None) or {}
+                st = dict(_pending.get(pid) or {})
                 if not code:
-                    await out("کشور ندارید")
+                    _pending.pop(pid, None)
+                    await out("ابتدا کشور انتخاب کنید.", main_kb(owner))
                     return
-                name = st.get("name")
-                if not name:
-                    await out("اطلاعات ساخت ناقص است. دوباره از «➕ ساخت اتحاد» شروع کنید.")
+                name = (st.get("name") or "").strip()
+                if not name or st.get("kind") not in ("ally_confirm", "ally_cap", None) and not st.get("max_members"):
+                    # still try if we have name+members+cap
+                    pass
+                if not name or st.get("max_members") is None or st.get("treasury_cap") is None:
+                    # keep pending if partial so user can restart cleanly
+                    _pending.pop(pid, None)
+                    rows = [[("➕ ساخت اتحاد", "ng:acreate")], cancel_row()]
+                    await out(
+                        "❌ اطلاعات ساخت ناقص یا منقضی شده.\nدوباره «➕ ساخت اتحاد» را بزنید.",
+                        ik(rows),
+                    )
                     return
                 try:
-                    msg = await game.alliances.create(
-                        pid,
-                        code,
-                        name,
-                        int(st.get("max_members") or 2),
-                        float(st.get("treasury_cap") or 100_000_000),
-                    )
+                    mm = int(st.get("max_members") or 2)
+                    tc = float(st.get("treasury_cap") or 100_000_000)
+                    msg = await game.alliances.create(pid, code, name, mm, tc)
+                    _pending.pop(pid, None)
+                    await out(msg, main_kb(owner))
                 except (AllianceError, GameError) as e:
-                    msg = f"❌ {e}"
-                await out(msg)
+                    # keep data so user can fix money and retry
+                    st["kind"] = "ally_confirm"
+                    _pending[pid] = st
+                    rows = [
+                        [("✅ تلاش دوباره", "ng:acreateyes")],
+                        [("➕ شروع مجدد", "ng:acreate")],
+                        cancel_row(),
+                    ]
+                    await out(f"❌ ساخت انجام نشد:\n{e}", ik(rows))
+                except Exception as e:
+                    _pending.pop(pid, None)
+                    log.exception("alliance create")
+                    await out(f"❌ خطای سیستمی ساخت اتحاد.\nدوباره تلاش کنید.", main_kb(owner))
                 return
             if data.startswith("ng:aview:"):
                 aid = int(data.split(":")[-1])

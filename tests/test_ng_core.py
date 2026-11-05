@@ -568,3 +568,25 @@ def test_alliance_system_v2(tmp_path):
         assert mult == 2.0
         await db.close()
     run(_t())
+
+
+def test_alliance_create_cost_and_retry(tmp_path):
+    async def _t():
+        from modules.ng.alliances import create_cost, AllianceError
+        db, g = await boot(tmp_path / "ally2", owner=1)
+        await g.claim(10, "US")
+        await db.execute("UPDATE ng_countries SET treasury=20000000 WHERE country_code='US'")
+        cost = create_cost(2, 100_000_000)
+        assert cost == 15_000_000
+        msg = await g.alliances.create(10, "US", "Alpha", 2, 100_000_000)
+        assert "ساخته" in msg or "✅" in msg
+        mem = await g.alliances.member_of("US")
+        assert mem and mem["role"] == "founder"
+        # second create fails
+        try:
+            await g.alliances.create(10, "US", "Beta", 2, 100_000_000)
+            assert False
+        except AllianceError:
+            pass
+        await db.close()
+    run(_t())
