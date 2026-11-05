@@ -32,6 +32,7 @@ BTN_OWNER = "🛡 پنل مالک"
 BTN_WORKSHOP = "🏭 کارگاه"
 BTN_ABOUT = "ℹ️ درباره ما"
 BTN_GUIDE = "📖 راهنمای بازی"
+BTN_REF = "🎁 دعوت کردن"
 BTN_TREATY = "⚖ پیمان‌ها"
 
 _pending: dict[int, dict] = {}
@@ -40,6 +41,7 @@ _pending: dict[int, dict] = {}
 def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
     kb = MenuKeyboardMarkup()
     rows = [
+        [BTN_REF],
         [BTN_MY, BTN_ECO],
         [BTN_WORKSHOP, BTN_SHOP],
         [BTN_INV, BTN_MKT],
@@ -224,9 +226,11 @@ def register_handlers(bot, app_ctx: dict):
                     return
                 rows = [
                     [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
+                    [("🤝 مدیریت اتحادها", "ng:oally"), ("📊 آمار دعوت", "ng:orefstats")],
                     [("جنگ باز", "ng:owar:1"), ("جنگ بسته", "ng:owar:0")],
                     [("هسته‌ای فعال", "ng:onuke:1"), ("هسته‌ای خاموش", "ng:onuke:0")],
                     [("بیانیه‌ها", "ng:ostmt"), ("درخواست‌های NPT", "ng:onpt")],
+                    [("🔕 در دسترس نیستم", "ng:oaway")],
                     [("تنظیم لاگ‌ها", "ng:ologs")],
                     [("📝 پیام /start", "ng:ostart"), ("ℹ️ درباره ما", "ng:oabout")],
                     [("🧪 حساب تستی", "ng:otest"), ("⚙️ عضویت اجباری", "ng:oforce")],
@@ -237,7 +241,7 @@ def register_handlers(bot, app_ctx: dict):
                 ]
                 await reply(message, "🛡 پنل مالک / سازمان ملل\nدستورات: /admin /owner /panel", ik(rows))
                 return
-            if text not in ("/start", "شروع", "منو", "menu") and text not in (BTN_ABOUT, BTN_GUIDE):
+            if text not in ("/start", "شروع", "منو", "menu") and text not in (BTN_ABOUT, BTN_GUIDE, BTN_REF):
                 if not await require_membership(pid, message, False):
                     return
             owner = game.is_owner(pid)
@@ -247,6 +251,14 @@ def register_handlers(bot, app_ctx: dict):
             if pid in _pending:
                 st = _pending[pid]
                 kind = st.get("kind")
+                if kind == "ref_code":
+                    _pending.pop(pid, None)
+                    try:
+                        msg = await game.apply_referral_code(pid, text.strip())
+                    except GameError as e:
+                        msg = f"❌ {e}"
+                    await reply(message, msg, main_kb(owner))
+                    return
                 if kind == "statement":
                     _pending.pop(pid, None)
                     if not code:
@@ -606,6 +618,16 @@ def register_handlers(bot, app_ctx: dict):
                 await reply(message, about, main_kb(owner))
                 return
 
+            if text == BTN_REF:
+                text_r = await game.referral_panel_text(pid)
+                rows = [
+                    [("📋 نمایش کد دعوت", "ng:refcode")],
+                    [("🎟 کد دعوت دارید؟", "ng:refenter")],
+                    back_row(),
+                ]
+                await reply(message, text_r, ik(rows))
+                return
+
             if text == BTN_GUIDE:
                 rows = guide_menu_rows()
                 await reply(
@@ -677,7 +699,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -1211,6 +1233,57 @@ def register_handlers(bot, app_ctx: dict):
                     await out(await game.reset_setting(pid, "about_message"))
                 except GameError as e:
                     await out(f"❌ {e}")
+                return
+
+            if data == "ng:oally":
+                rows_db = await game.list_alliances()
+                text = await game.alliances_summary_text()
+                rows = []
+                for p in rows_db[:20]:
+                    a = await game.country_name_only(p["country_a"])
+                    b = await game.country_name_only(p["country_b"])
+                    rows.append([(f"#{p['id']} {a}↔{b}", f"ng:oally:{p['id']}")])
+                rows.append(back_row())
+                await out(text, ik(rows))
+                return
+            if data.startswith("ng:oally:"):
+                try:
+                    await out(await game.alliance_detail_text(int(data.split(":")[-1])))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:oaway":
+                cur = await game.get_owner_away()
+                rows = [
+                    [("🔕 فعال کردن", "ng:oaway:1"), ("🔔 خاموش کردن", "ng:oaway:0")],
+                    back_row(),
+                ]
+                st = "فعال" if cur else "غیرفعال"
+                await out(f"وضعیت «در دسترس نیستم»: {st}", ik(rows))
+                return
+            if data.startswith("ng:oaway:"):
+                en = data.endswith(":1")
+                try:
+                    await out(await game.set_owner_away(pid, en))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:orefstats":
+                await out(await game.referral_stats_text())
+                return
+            if data == "ng:refcode":
+                row = await game.ensure_referral_row(pid)
+                code = row["referral_code"]
+                await out(
+                    "📋 کد دعوت شما:\n\n"
+                    + code
+                    + "\n\nاین کد را کپی کنید و برای دوستتان بفرستید.\n"
+                    "(ربات‌ها مستقیماً کلیپ‌بورد گوشی را کنترل نمی‌کنند.)"
+                )
+                return
+            if data == "ng:refenter":
+                _pending[pid] = {"kind": "ref_code"}
+                await out("لطفاً کد دعوت دوستت رو وارد کن:")
                 return
 
             if data == "ng:o:players" or data.startswith("ng:o:players:"):

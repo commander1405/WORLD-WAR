@@ -486,3 +486,55 @@ def test_defense_intercept_and_cyber(tmp_path):
         assert "رهگیری" in rep or "خسارت" in rep
         await db.close()
     run(_t())
+
+
+def test_daily_grant_and_referral_and_away(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "ref", owner=1)
+        await g.claim(10, "US")
+        await g.claim(11, "DE")
+        await db.execute("UPDATE ng_countries SET treasury=1000 WHERE country_code='US'")
+        await db.execute("UPDATE ng_countries SET treasury=1000 WHERE country_code='DE'")
+        n = await g.daily_payout_all()
+        assert n >= 2
+        us = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'")
+        assert float(us["treasury"]) >= 1000 + 20_000_000 - 1
+        n2 = await g.daily_payout_all()
+        assert n2 == 0  # no double pay
+        # referral
+        await g.ensure_referral_row(10)
+        r10 = await g.ensure_referral_row(10)
+        code = r10["referral_code"]
+        msg = await g.apply_referral_code(11, code)
+        assert "ثبت" in msg or "✅" in msg
+        de = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='DE'")
+        us2 = await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'")
+        assert float(de["treasury"]) >= 1000 + 20_000_000 + 2_000_000 - 2
+        assert float(us2["treasury"]) >= float(us["treasury"]) + 15_000_000 - 1
+        # no self-ref
+        try:
+            await g.apply_referral_code(10, code)
+            assert False
+        except GameError:
+            pass
+        # owner away
+        await g.set_owner_away(1, True)
+        assert await g.get_owner_away()
+        await g.set_owner_away(1, False)
+        assert not await g.get_owner_away()
+        # admin money
+        before = float((await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'"))["treasury"])
+        await g.admin_money(1, "US", 5000)
+        after = float((await db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code='US'"))["treasury"])
+        assert abs(after - before - 5000) < 1
+        # alliances list
+        await g.peace_request("US", "DE", 5, 10)
+        peaces = await db.fetch("SELECT * FROM ng_peace")
+        assert peaces
+        # accept
+        pid = int(peaces[0]["id"])
+        await g.peace_accept(pid, "DE", 11)
+        allies = await g.list_alliances()
+        assert any(int(a["id"]) == pid for a in allies)
+        await db.close()
+    run(_t())

@@ -391,7 +391,7 @@ class Game:
         )
 
     async def daily_payout_all(self) -> int:
-        """Pay once per Tehran calendar day."""
+        """Pay once per Tehran calendar day: base grant + building net."""
         today = datetime.now(TEHRAN).date().isoformat()
         countries = await self.db.fetch(
             "SELECT * FROM ng_countries WHERE owner_player_id IS NOT NULL AND is_destroyed=0"
@@ -399,6 +399,9 @@ class Game:
         n = 0
         for c in countries:
             code = c["country_code"]
+            if code == UN_CODE:
+                # UN still can receive if owned; keep consistent
+                pass
             exists = await self.db.fetchrow(
                 "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
                 (code, today),
@@ -407,7 +410,8 @@ class Game:
                 continue
             await self.recalc_income(code)
             c2 = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
-            net = float(c2["daily_income"]) - float(c2["daily_expense"])
+            net_buildings = float(c2["daily_income"]) - float(c2["daily_expense"])
+            total = float(self.BASE_DAILY_GRANT) + net_buildings
             async with self.db.transaction() as tx:
                 again = await tx.fetchrow(
                     "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
@@ -417,14 +421,25 @@ class Game:
                     continue
                 await tx.execute(
                     "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-                    (float(c2["treasury"]) + net, code),
+                    (float(c2["treasury"]) + total, code),
                 )
                 await tx.execute(
                     "INSERT INTO ng_daily_payouts (country_code, payout_date, amount) VALUES ($1,$2,$3)",
-                    (code, today, net),
+                    (code, today, total),
                 )
             n += 1
-            await self.log_activity("daily", f"درآمد روزانه: {int(net):,}", code)
+            await self.log_activity(
+                "daily",
+                f"درآمد روزانه: پایه {int(self.BASE_DAILY_GRANT):,} + ساختمان {int(net_buildings):,} = {int(total):,}",
+                code,
+            )
+            try:
+                await self.ledger_write(
+                    "daily_grant", total, int(c2.get("owner_player_id") or 0),
+                    to_c=code, reason=f"daily {today}",
+                )
+            except Exception:
+                pass
         return n
 
     # ---------- market ----------
@@ -645,6 +660,9 @@ class Game:
 
     # ---------- war ----------
     ATTACK_COOLDOWN_SEC = 300
+    BASE_DAILY_GRANT = 20_000_000  # fixed daily grant per owned country (Tehran day)
+    REF_INVITEE_REWARD = 2_000_000
+    REF_REFERRER_REWARD = 15_000_000
     MAX_LOOT_RATIO = 0.08  # max 8% of defender treasury
     MAX_LOOT_ABS = 2_000_000
 
@@ -1219,11 +1237,13 @@ class Game:
             "📢 بیانیه جدید" + chr(10) + chr(10) + "متن:" + chr(10) + body[:1500] + chr(10) + chr(10)
             + "شناسه فرستنده:" + chr(10) + str(pid) + chr(10) + chr(10) + "کشور:" + chr(10) + str(name)
         )
+        if await self.get_owner_away():
+            return await self.review_statement(sid, True, self.owner_id)
         await self._owner_inbox("statement", sid, f"بیانیه — {name}", owner_body)
         return "✅ بیانیه برای بررسی مالک ارسال شد."
 
     async def review_statement(self, sid: int, approve: bool, actor: int) -> str:
-        if actor != self.owner_id:
+        if not self.owner_id or int(actor) != int(self.owner_id):
             raise GameError("فقط مالک")
         s = await self.db.fetchrow("SELECT * FROM ng_statements WHERE id=$1", (sid,))
         if not s or s["status"] != "pending":
@@ -1301,15 +1321,41 @@ class Game:
     async def admin_money(self, actor: int, code: str, amount: float) -> str:
         if not self.is_owner(actor):
             raise GameError("مجاز نیستید")
-        c = await self.db.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", (code,))
+        amount = float(amount)
+        if amount == 0:
+            raise GameError("مبلغ صفر نامعتبر است")
+        c = await self.db.fetchrow(
+            "SELECT treasury, name_fa, currency_name_fa FROM ng_countries WHERE country_code=$1",
+            (code,),
+        )
         if not c:
-            raise GameError("کشور نیست")
+            raise GameError("کشور یافت نشد")
+        new_t = float(c["treasury"]) + amount
+        if new_t < 0:
+            raise GameError("موجودی کشور کافی نیست")
         await self.db.execute(
             "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-            (float(c["treasury"]) + float(amount), code),
+            (new_t, code),
         )
-        await self.admin_log(actor, "money", f"{code} {amount}")
-        return "انجام شد."
+        await self.admin_log(actor, "money", f"{code} {amount:+}")
+        try:
+            await self.ledger_write(
+                "admin_money", abs(amount), actor,
+                to_c=code if amount > 0 else None,
+                from_c=code if amount < 0 else None,
+                reason="مالک",
+            )
+        except Exception:
+            pass
+        label = c.get("name_fa") or code
+        cur = c.get("currency_name_fa") or ""
+        return (
+            f"✅ انتقال انجام شد.\n"
+            f"کشور: {label}\n"
+            f"تغییر: {int(amount):+,} {cur}\n"
+            f"موجودی جدید: {int(new_t):,} {cur}\n"
+            "(قابل خرج در فروشگاه)"
+        )
 
     async def full_reset(self, actor: int, confirm_phrase: str) -> str:
         if not self.is_owner(actor):
@@ -1319,7 +1365,7 @@ class Game:
         tables = [
             "ng_cart","ng_market","ng_peace","ng_statements","ng_daily_payouts",
             "ng_activity","ng_admin_log","ng_buildings","ng_inventory","ng_players",
-            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode","ng_finance_ledger","ng_player_activity","ng_cyber_effects",
+            "ng_workshop","ng_workshop_jobs","ng_npt_requests","ng_owner_inbox","ng_war_state","ng_test_mode","ng_finance_ledger","ng_player_activity","ng_cyber_effects","ng_referrals",
         ]
         async with self.db.transaction() as tx:
             for t in tables:
@@ -2871,4 +2917,206 @@ class Game:
             "بن بودن او تغییر نکرد. لاگ‌ها حفظ شدند."
         )
 
+
+    # ---------- alliances (active peace) ----------
+    async def list_alliances(self) -> list[dict]:
+        return await self.db.fetch(
+            "SELECT * FROM ng_peace WHERE status='active' ORDER BY id DESC"
+        )
+
+    async def alliance_detail_text(self, peace_id: int) -> str:
+        p = await self.db.fetchrow("SELECT * FROM ng_peace WHERE id=$1", (peace_id,))
+        if not p:
+            raise GameError("اتحاد یافت نشد")
+        a = await self.country_label(p["country_a"])
+        b = await self.country_label(p["country_b"])
+        return (
+            f"🤝 جزئیات اتحاد #{p['id']}\n\n"
+            f"کشور اول: {a}\n"
+            f"کشور دوم: {b}\n"
+            f"وضعیت: {p['status']}\n"
+            f"نوع: پیمان صلح / اتحاد موقت\n"
+            f"مدت توافق: {p.get('duration_hours')} ساعت\n"
+            f"شروع: {p.get('started_at') or '—'}\n"
+            f"پایان: {p.get('ends_at') or '—'}\n"
+            f"درخواست‌دهنده: {p.get('requested_by') or '—'}"
+        )
+
+    async def alliances_summary_text(self) -> str:
+        rows = await self.list_alliances()
+        lines = [f"🤝 مدیریت اتحادها", f"تعداد اتحاد فعال: {len(rows)}", ""]
+        for p in rows[:40]:
+            a = await self.country_name_only(p["country_a"])
+            b = await self.country_name_only(p["country_b"])
+            lines.append(f"#{p['id']} {a} ↔ {b}")
+        if not rows:
+            lines.append("اتحاد فعالی ثبت نشده است.")
+        return "\n".join(lines)
+
+    async def get_owner_away(self) -> bool:
+        v = await self.get_setting("owner_away", "0")
+        return str(v) in ("1", "true", "yes", "on")
+
+    async def set_owner_away(self, actor: int, enabled: bool) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        val = "1" if enabled else "0"
+        row = await self.db.fetchrow("SELECT key FROM ng_bot_settings WHERE key=$1", ("owner_away",))
+        if row:
+            await self.db.execute(
+                "UPDATE ng_bot_settings SET value=$1 WHERE key=$2", (val, "owner_away")
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO ng_bot_settings (key, value) VALUES ($1,$2)", ("owner_away", val)
+            )
+        await self.admin_log(actor, "owner_away", val)
+        if enabled:
+            return "🔕 حالت «در دسترس نیستم» فعال شد. بیانیه‌ها خودکار منتشر می‌شوند."
+        return "🔔 حالت «در دسترس نیستم» غیرفعال شد. بیانیه‌ها نیاز به تأیید دارند."
+
+    def _make_ref_code(self, pid: int) -> str:
+        return f"WW{int(pid)}"
+
+    async def ensure_referral_row(self, pid: int) -> dict:
+        row = await self.db.fetchrow("SELECT * FROM ng_referrals WHERE player_id=$1", (pid,))
+        if row:
+            return row
+        code = self._make_ref_code(pid)
+        await self.db.execute(
+            "INSERT INTO ng_referrals (player_id, referral_code) VALUES ($1,$2)",
+            (pid, code),
+        )
+        return await self.db.fetchrow("SELECT * FROM ng_referrals WHERE player_id=$1", (pid,))
+
+    async def referral_panel_text(self, pid: int, bot_username: str | None = None) -> str:
+        row = await self.ensure_referral_row(pid)
+        code = row["referral_code"]
+        kids = await self.db.fetch(
+            "SELECT player_id FROM ng_referrals WHERE referrer_id=$1", (pid,)
+        )
+        names = []
+        for k in kids[:30]:
+            p = await self.db.fetchrow(
+                "SELECT username, display_name FROM ng_players WHERE player_id=$1",
+                (k["player_id"],),
+            )
+            names.append((p or {}).get("display_name") or (p or {}).get("username") or str(k["player_id"]))
+        referrer_txt = "بدون دعوت‌کننده"
+        if row.get("referrer_id"):
+            rp = await self.db.fetchrow(
+                "SELECT username, display_name FROM ng_players WHERE player_id=$1",
+                (int(row["referrer_id"]),),
+            )
+            referrer_txt = (rp or {}).get("display_name") or (rp or {}).get("username") or str(row["referrer_id"])
+        link_line = f"لینک: https://ble.ir/{bot_username}?start={code}" if bot_username else ""
+        lines = [
+            "هی! می‌دونستی می‌تونی با دعوت دوستات هم خودت و هم دوستت پول بگیرین؟ 😍",
+            "",
+            f"کد دعوت شما: {code}",
+        ]
+        if link_line:
+            lines.append(link_line)
+        lines += [
+            "",
+            f"تعداد زیرمجموعه‌ها: {len(kids)} نفر",
+            f"شما زیرمجموعه چه کسی هستید؟ {referrer_txt}",
+            "",
+            "افرادی که دعوت کرده‌اید:",
+        ]
+        if names:
+            lines.extend(f"• {n}" for n in names)
+        else:
+            lines.append("هنوز کسی با کد شما وارد نشده.")
+        return "\n".join(lines)
+
+    async def apply_referral_code(self, pid: int, code: str) -> str:
+        code = (code or "").strip().upper()
+        if not code:
+            raise GameError("کد خالی است")
+        me = await self.ensure_referral_row(pid)
+        if me.get("referrer_id"):
+            raise GameError("شما قبلاً دعوت‌کننده ثبت کرده‌اید.")
+        if str(me.get("referral_code") or "").upper() == code:
+            raise GameError("نمی‌توانید کد خودتان را وارد کنید.")
+        all_r = await self.db.fetch("SELECT * FROM ng_referrals")
+        owner_row = next((r for r in all_r if str(r.get("referral_code") or "").upper() == code), None)
+        if not owner_row:
+            raise GameError("کد دعوت نامعتبر است.")
+        rid = int(owner_row["player_id"])
+        if rid == int(pid):
+            raise GameError("نمی‌توانید کد خودتان را وارد کنید.")
+        rp = await self.db.fetchrow("SELECT player_id FROM ng_players WHERE player_id=$1", (rid,))
+        if not rp:
+            raise GameError("دعوت‌کننده معتبر نیست.")
+        my_code = await self.player_country(pid)
+        ref_code_c = await self.player_country(rid)
+        if not my_code:
+            raise GameError("ابتدا کشور انتخاب کنید، بعد کد دعوت را وارد کنید.")
+        if not ref_code_c:
+            raise GameError("دعوت‌کننده هنوز کشور ندارد؛ بعداً تلاش کنید.")
+        now = datetime.now(timezone.utc).isoformat()
+        async with self.db.transaction() as tx:
+            cur = await tx.fetchrow("SELECT * FROM ng_referrals WHERE player_id=$1", (pid,))
+            if cur and cur.get("referrer_id"):
+                raise GameError("قبلاً ثبت شده")
+            await tx.execute(
+                "UPDATE ng_referrals SET referrer_id=$1, bound_at=$2, invitee_reward=$3, referrer_reward=$4 WHERE player_id=$5",
+                (rid, now, self.REF_INVITEE_REWARD, self.REF_REFERRER_REWARD, pid),
+            )
+            me_c = await tx.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", (my_code,))
+            ref_c = await tx.fetchrow("SELECT treasury FROM ng_countries WHERE country_code=$1", (ref_code_c,))
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (float(me_c["treasury"]) + self.REF_INVITEE_REWARD, my_code),
+            )
+            await tx.execute(
+                "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                (float(ref_c["treasury"]) + self.REF_REFERRER_REWARD, ref_code_c),
+            )
+        try:
+            await self.ledger_write("referral_invitee", self.REF_INVITEE_REWARD, pid, to_c=my_code, reason=code)
+            await self.ledger_write("referral_referrer", self.REF_REFERRER_REWARD, rid, to_c=ref_code_c, reason=code)
+        except Exception:
+            pass
+        await self.log_activity("referral", f"کد {code} توسط {pid}", my_code, pid)
+        try:
+            await self.log_activity(
+                "dm_notice",
+                f"🎁 یک نفر با کد دعوت شما وارد شد و {int(self.REF_REFERRER_REWARD):,} به خزانه‌تان اضافه شد.",
+                player_id=rid,
+            )
+        except Exception:
+            pass
+        return (
+            f"✅ کد دعوت ثبت شد.\n"
+            f"پاداش شما: {int(self.REF_INVITEE_REWARD):,}\n"
+            f"پاداش دعوت‌کننده: {int(self.REF_REFERRER_REWARD):,}"
+        )
+
+    async def referral_stats_text(self) -> str:
+        rows = await self.db.fetch("SELECT * FROM ng_referrals WHERE referrer_id IS NOT NULL")
+        total = len(rows)
+        paid = sum(float(r.get("invitee_reward") or 0) + float(r.get("referrer_reward") or 0) for r in rows)
+        counts: dict = {}
+        for r in rows:
+            rid = int(r["referrer_id"])
+            counts[rid] = counts.get(rid, 0) + 1
+        top = sorted(counts.items(), key=lambda x: -x[1])[:10]
+        lines = [
+            "📊 آمار دعوت",
+            f"دعوت‌های موفق: {total}",
+            f"مجموع پاداش پرداخت‌شده: {int(paid):,}",
+            "",
+            "برترین دعوت‌کنندگان:",
+        ]
+        if not top:
+            lines.append("—")
+        for rid, n in top:
+            p = await self.db.fetchrow(
+                "SELECT username, display_name FROM ng_players WHERE player_id=$1", (rid,)
+            )
+            name = (p or {}).get("display_name") or (p or {}).get("username") or str(rid)
+            lines.append(f"• {name}: {n} نفر")
+        return "\n".join(lines)
 
