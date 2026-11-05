@@ -168,11 +168,29 @@ class ControlService:
         )
 
     async def _set_flag(self, code: str, field: str, value: int, sat_delta: float, note: str) -> str:
+        """Change a control flag only if state actually changes — no sat spam."""
+        allowed = {"flights_open", "maritime_open", "internet_on"}
+        if field not in allowed:
+            raise ControlError("فیلد نامعتبر")
         await self.ensure_control(code)
         c = await self.db.fetchrow(
             "SELECT * FROM ng_country_control WHERE country_code=$1", (code,)
         )
-        sat = max(0.0, min(100.0, float(c["satisfaction"]) + sat_delta))
+        cur = int(c.get(field) or 0)
+        value = 1 if int(value) else 0
+        sat = float(c["satisfaction"])
+        if cur == value:
+            labels = {
+                "flights_open": "پروازها",
+                "maritime_open": "سفر دریایی",
+                "internet_on": "اینترنت",
+            }
+            state = "فعال" if value else "غیرفعال"
+            return (
+                f"ℹ️ {labels.get(field, field)} از قبل {state} است.\n"
+                f"رضایت مردم: {sat:.0f}/100 (بدون تغییر)"
+            )
+        sat = max(0.0, min(100.0, sat + float(sat_delta)))
         now = datetime.now(timezone.utc).isoformat()
         await self.db.execute(
             f"UPDATE ng_country_control SET {field}=$1, satisfaction=$2, updated_at=$3 WHERE country_code=$4",
@@ -330,7 +348,13 @@ class ControlService:
                 (code, now, strait_code),
             )
             # satisfaction hit for controller too (diplomatic cost)
-            await self._set_flag(code, "flights_open", int((await self.ensure_control(code))["flights_open"]), -4, "")
+            # mild one-time diplomatic cost when closing a strait (only on real close)
+            ctrl = await self.ensure_control(code)
+            sat = max(0.0, float(ctrl["satisfaction"]) - 4)
+            await self.db.execute(
+                "UPDATE ng_country_control SET satisfaction=$1, updated_at=$2 WHERE country_code=$3",
+                (sat, datetime.now(timezone.utc).isoformat(), code),
+            )
             await self.g.broadcast_log(
                 "strait",
                 f"🌊 تنگه «{s['name_fa']}» توسط {await self.g.country_label(code)} بسته شد.\nقیمت نفت و تجارت جهانی تحت فشار قرار گرفت.",

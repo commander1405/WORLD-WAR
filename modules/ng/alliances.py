@@ -11,9 +11,9 @@ TEHRAN = ZoneInfo("Asia/Tehran")
 if TYPE_CHECKING:
     from modules.ng.game import Game
 
-BASE_CREATE_COST = 4_000_000
-COST_PER_EXTRA_MEMBER = 700_000  # beyond 2
-COST_PER_100M_TREASURY = 1_200_000  # beyond 100M base included
+BASE_CREATE_COST = 2_000_000
+COST_PER_EXTRA_MEMBER = 200_000  # beyond 2
+COST_PER_100M_TREASURY = 150_000  # beyond 100M base
 BASE_MEMBER_SLOTS = 2
 BASE_TREASURY_CAP = 100_000_000
 MIN_MEMBERS = 2
@@ -30,7 +30,7 @@ class AllianceError(Exception):
     pass
 
 
-MAX_CREATE_COST = 20_000_000
+MAX_CREATE_COST = 7_000_000
 
 
 def create_cost(max_members: int, treasury_cap: float) -> int:

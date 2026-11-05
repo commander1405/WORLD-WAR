@@ -685,7 +685,7 @@ def test_owner_shop_price_and_discount(tmp_path):
         await g.set_shop_discount(1, 0)
         assert await g.get_shop_discount_pct() == 0
         from modules.ng.alliances import create_cost
-        assert create_cost(2, 100_000_000) == 4_000_000
-        assert create_cost(20, 5_000_000_000) <= 20_000_000
+        assert create_cost(2, 100_000_000) == 2_000_000
+        assert create_cost(20, 5_000_000_000) <= 7_000_000
         await db.close()
     run(_t())
