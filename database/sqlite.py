@@ -36,7 +36,14 @@ class SQLiteDatabase(Database):
         self._db = await aiosqlite.connect(self._path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA foreign_keys = ON")
-        await self._db.execute("PRAGMA journal_mode = WAL")
+        # Single-file mode on phone: avoid .db-wal/.db-shm looking like extra databases.
+        # Data safety is preserved; checkpoint any leftover WAL on open.
+        try:
+            await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
+        await self._db.execute("PRAGMA journal_mode = DELETE")
+        await self._db.execute("PRAGMA synchronous = NORMAL")
         await self._db.commit()
         log.info("SQLite ready at %s", self._path)
 
