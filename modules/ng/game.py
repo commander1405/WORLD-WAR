@@ -119,14 +119,19 @@ class Game:
                 await self.db.execute(
                     """
                     UPDATE ng_shop_catalog SET
-                        category=$2, name_fa=$3, description_fa=$4, unit_price=$5,
-                        max_per_order=$6, power_score=$7, daily_income=$8,
-                        maintenance=$9, is_building=$10
+                        category=$2, name_fa=$3, description_fa=$4,
+                        max_per_order=$5, power_score=$6, daily_income=$7,
+                        maintenance=$8, is_building=$9
                     WHERE item_code=$1
                     """,
-                    vals,
+                    (
+                        c["item_code"], c["category"], c["name_fa"], c["description_fa"],
+                        c["max_per_order"], c["power_score"],
+                        c["daily_income"], c["maintenance"], c["is_building"],
+                    ),
                 )
             self._cat[c["item_code"]] = c
+        await self._reload_catalog_prices()
 
     async def _seed_countries(self) -> None:
         data = json.loads(SEED_PATH.read_text(encoding="utf-8"))
@@ -317,6 +322,12 @@ class Game:
                 oil = await self.control.global_oil_price_mult()
                 # mild global pressure already in oil mult for energy items applied in cart later
                 m *= min(1.15, 1.0 + (oil - 1.0) * 0.2)
+        except Exception:
+            pass
+        try:
+            disc = await self.get_shop_discount_pct()
+            if disc > 0:
+                m *= max(0.3, 1.0 - disc / 100.0)
         except Exception:
             pass
         return m
@@ -1774,6 +1785,100 @@ class Game:
         for r in rows:
             await self.db.execute("DELETE FROM ng_activity WHERE id=$1", (r["id"],))
         return rows
+
+
+    async def _reload_catalog_prices(self) -> None:
+        """Sync in-memory catalog prices from DB (owner overrides)."""
+        try:
+            rows = await self.db.fetch("SELECT item_code, unit_price, name_fa, category, description_fa, max_per_order, power_score, daily_income, maintenance, is_building FROM ng_shop_catalog")
+        except Exception:
+            return
+        for r in rows:
+            code = r["item_code"]
+            base = dict(self._cat.get(code) or {})
+            base.update({
+                "item_code": code,
+                "unit_price": float(r["unit_price"]),
+                "name_fa": r.get("name_fa") or base.get("name_fa") or code,
+                "category": r.get("category") or base.get("category") or "misc",
+                "description_fa": r.get("description_fa") or base.get("description_fa") or "",
+                "max_per_order": float(r.get("max_per_order") or base.get("max_per_order") or 10),
+                "power_score": float(r.get("power_score") or base.get("power_score") or 0),
+                "daily_income": float(r.get("daily_income") or base.get("daily_income") or 0),
+                "maintenance": float(r.get("maintenance") or base.get("maintenance") or 0),
+                "is_building": int(r.get("is_building") or base.get("is_building") or 0),
+            })
+            self._cat[code] = base
+
+    async def get_shop_discount_pct(self) -> float:
+        try:
+            val = await self.get_setting("shop_discount_pct", "0")
+            return max(0.0, min(70.0, float(val or 0)))
+        except Exception:
+            return 0.0
+
+    async def set_shop_discount(self, actor: int, pct: float) -> str:
+        if not self.is_owner(actor):
+            raise GameError("فقط مالک")
+        pct = float(pct)
+        allowed = {0, 10, 20, 30, 40, 50, 60, 70}
+        if pct not in allowed:
+            raise GameError("تخفیف باید یکی از ۰/۱۰/۲۰/۳۰/۴۰/۵۰/۶۰/۷۰ باشد.")
+        # only one active — setting replaces previous
+        await self.set_setting(actor, "shop_discount_pct", str(int(pct)))
+        if pct <= 0:
+            await self.admin_log(actor, "shop_discount", "off")
+            return "✅ همه تخفیف‌های فروشگاه غیرفعال شد."
+        await self.admin_log(actor, "shop_discount", f"{int(pct)}%")
+        return (
+            f"✅ تخفیف سراسری فروشگاه: {int(pct)}٪ فعال شد.\n"
+            "تخفیف قبلی در صورت وجود جایگزین شد (فقط یک تخفیف همزمان)."
+        )
+
+    async def set_item_unit_price(self, actor: int, item_code: str, price: float) -> str:
+        if not self.is_owner(actor):
+            raise GameError("فقط مالک")
+        item_code = (item_code or "").strip()
+        price = float(price)
+        if price < 0:
+            raise GameError("قیمت نمی‌تواند منفی باشد.")
+        if price > 10_000_000_000:
+            raise GameError("قیمت بیش از حد بزرگ است.")
+        row = await self.db.fetchrow(
+            "SELECT * FROM ng_shop_catalog WHERE item_code=$1", (item_code,)
+        )
+        if not row:
+            raise GameError("آیتم در فروشگاه یافت نشد.")
+        await self.db.execute(
+            "UPDATE ng_shop_catalog SET unit_price=$1 WHERE item_code=$2",
+            (price, item_code),
+        )
+        if item_code in self._cat:
+            self._cat[item_code] = {**self._cat[item_code], "unit_price": price}
+        else:
+            await self._reload_catalog_prices()
+        await self.admin_log(actor, "shop_price", f"{item_code}={int(price)}")
+        name = row.get("name_fa") or item_code
+        return f"✅ قیمت «{name}» ثبت شد: {int(price):,}"
+
+    async def list_catalog_by_category(self, category: str | None = None) -> list[dict]:
+        await self._reload_catalog_prices()
+        if category:
+            rows = await self.db.fetch(
+                "SELECT * FROM ng_shop_catalog WHERE category=$1 ORDER BY name_fa",
+                (category,),
+            )
+        else:
+            rows = await self.db.fetch(
+                "SELECT * FROM ng_shop_catalog ORDER BY category, name_fa"
+            )
+        disc = await self.get_shop_discount_pct()
+        out = []
+        for r in rows:
+            base = float(r["unit_price"])
+            eff = base * (1.0 - disc / 100.0) if disc else base
+            out.append({**dict(r), "unit_price": base, "price_eff": eff, "discount_pct": disc})
+        return out
 
     async def world_status_text(self, *, for_owner: bool = False) -> str:
         meta = await self.db.fetchrow("SELECT * FROM world_meta WHERE id=1")

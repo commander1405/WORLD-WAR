@@ -255,6 +255,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("تغییر پول کشور", "ng:omoney")],
                     [("💰 گرفتن مالیات", "ng:otax"), ("⚖️ محکوم کردن کشور", "ng:ocondemn")],
                     [("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
+                    [("🏷 قیمت فروشگاه", "ng:oprices"), ("🏷 تخفیف فروشگاه", "ng:odiscount")],
                     [("🔴 ریست کامل جهان", "ng:oreset1")],
                 ]
                 await reply(message, "🛡 پنل مالک / سازمان ملل\nدستورات: /admin /owner /panel", ik(rows))
@@ -409,6 +410,17 @@ def register_handlers(bot, app_ctx: dict):
                     except (AllianceError, GameError, ValueError, KeyError) as e:
                         msg = f"❌ {e}"
                     _pending.pop(pid, None)
+                    await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "set_shop_price":
+                    st = _pending.pop(pid, {})
+                    try:
+                        price = float(text.replace(",", "").replace("،", "").strip())
+                        msg = await game.set_item_unit_price(pid, st.get("item"), price)
+                    except GameError as e:
+                        msg = f"❌ {e}"
+                    except Exception:
+                        msg = "❌ عدد معتبر وارد کنید."
                     await reply(message, msg, main_kb(owner))
                     return
                 if kind == "law_title":
@@ -936,7 +948,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -1196,14 +1208,17 @@ def register_handlers(bot, app_ctx: dict):
                     await game.ensure_shop_catalog()
                 except Exception:
                     log.exception("shop catalog seed")
-                items = items_in_category(cat)
+                items = await game.list_catalog_by_category(cat)
                 title = CAT_FA.get(cat, cat)
                 if not items:
                     await out(f"در دسته «{title}» محصولی نیست. ربات را یک‌بار ری‌استارت کنید.")
                     return
+                disc = await game.get_shop_discount_pct()
                 rows = []
                 for i in items:
-                    rows.append([(f"{i['name_fa']} — {int(i['unit_price']):,}", f"ng:item:{i['item_code']}")])
+                    p = int(float(i.get("price_eff") or i["unit_price"]))
+                    tag = f" (−{int(disc)}٪)" if disc else ""
+                    rows.append([(f"{i['name_fa']} — {p:,}{tag}", f"ng:item:{i['item_code']}")])
                 rows.append([("🛒 سبد", "ng:cart"), ("⬅️ دسته‌ها", "ng:shophome")])
                 rows.append(back_row())
                 await out(f"🛒 {title}\n{len(items)} محصول:", ik(rows))
@@ -1229,15 +1244,26 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:item:"):
                 ic = data.split(":")[-1]
-                it = game._cat[ic]
+                await game._reload_catalog_prices()
+                it = game._cat.get(ic) or {}
+                if not it:
+                    await out("آیتم یافت نشد")
+                    return
+                disc = await game.get_shop_discount_pct()
+                base = float(it.get("unit_price") or 0)
+                eff = base * (1 - disc / 100.0) if disc else base
+                price_line = f"قیمت: {int(eff):,}"
+                if disc:
+                    price_line += f" (پایه {int(base):,} با تخفیف {int(disc)}٪)"
                 rows = [
                     [("＋۱", f"ng:add:{ic}:1"), ("＋۵", f"ng:add:{ic}:5"), ("＋۱۰", f"ng:add:{ic}:10")],
                     [("سبد", "ng:cart"), ("تسویه", "ng:checkout")],
                     back_row(),
                 ]
                 await out(
-                    f"{it['name_fa']}\n{it['description_fa']}\nقیمت: {int(it['unit_price']):,}\n"
-                    f"درآمد روزانه: {int(it['daily_income']):,}\nنگهداری: {int(it['maintenance']):,}",
+                    f"{it.get('name_fa')}\n{it.get('description_fa')}\n{price_line}\n"
+                    f"درآمد روزانه: {int(float(it.get('daily_income') or 0)):,}\n"
+                    f"نگهداری: {int(float(it.get('maintenance') or 0)):,}",
                     ik(rows),
                 )
                 return
@@ -1888,6 +1914,71 @@ def register_handlers(bot, app_ctx: dict):
                 await out(await game.economy_card(code))
                 return
 
+
+
+            if data == "ng:oprices":
+                rows = []
+                pair = []
+                for cat, name in CAT_FA.items():
+                    pair.append((name, f"ng:opricecat:{cat}"))
+                    if len(pair) == 2:
+                        rows.append(pair)
+                        pair = []
+                if pair:
+                    rows.append(pair)
+                rows.append(back_row())
+                await out("🏷 قیمت فروشگاه\nدسته را انتخاب کنید:", ik(rows))
+                return
+            if data.startswith("ng:opricecat:"):
+                cat = data.split(":")[-1]
+                items = await game.list_catalog_by_category(cat)
+                rows = []
+                for i in items[:40]:
+                    rows.append([(
+                        f"{i['name_fa']} | {int(float(i['unit_price'])):,}",
+                        f"ng:opriceitem:{i['item_code']}",
+                    )])
+                rows.append([("⬅️ دسته‌ها", "ng:oprices")])
+                rows.append(back_row())
+                await out(f"آیتم‌های {CAT_FA.get(cat, cat)} — روی مورد بزنید تا قیمت جدید بدهید:", ik(rows))
+                return
+            if data.startswith("ng:opriceitem:"):
+                ic = data.split(":")[-1]
+                await game._reload_catalog_prices()
+                it = game._cat.get(ic) or {}
+                _pending[pid] = {"kind": "set_shop_price", "item": ic}
+                await out(
+                    f"قیمت فعلی «{it.get('name_fa', ic)}»: {int(float(it.get('unit_price') or 0)):,}\n"
+                    f"قیمت جدید را به عدد بنویسید:",
+                    ik([cancel_row()]),
+                )
+                return
+            if data == "ng:odiscount":
+                cur = await game.get_shop_discount_pct()
+                rows = [
+                    [("۱۰٪", "ng:odiscon:10"), ("۲۰٪", "ng:odiscon:20")],
+                    [("۳۰٪", "ng:odiscon:30"), ("۴۰٪", "ng:odiscon:40")],
+                    [("۵۰٪", "ng:odiscon:50"), ("۶۰٪", "ng:odiscon:60")],
+                    [("۷۰٪", "ng:odiscon:70")],
+                    [("❌ غیرفعال کردن تخفیف", "ng:odiscoff")],
+                    back_row(),
+                ]
+                st = f"فعال: {int(cur)}٪" if cur else "هیچ تخفیفی فعال نیست"
+                await out(f"🏷 تخفیف سراسری فروشگاه\nوضعیت: {st}\nفقط یک تخفیف همزمان مجاز است.", ik(rows))
+                return
+            if data.startswith("ng:odiscon:"):
+                pct = float(data.split(":")[-1])
+                try:
+                    await out(await game.set_shop_discount(pid, pct))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:odiscoff":
+                try:
+                    await out(await game.set_shop_discount(pid, 0))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
 
             # ---- Double HP (owner only) ----
             if data == "ng:odblhp":

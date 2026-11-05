@@ -665,3 +665,27 @@ def test_country_control_and_laws(tmp_path):
         assert n >= 1
         await db.close()
     run(_t())
+
+
+def test_owner_shop_price_and_discount(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "price", owner=1)
+        await g.ensure_shop_catalog()
+        items = await g.list_catalog_by_category("ground")
+        assert items
+        code = items[0]["item_code"]
+        await g.set_item_unit_price(1, code, 123456)
+        await g._reload_catalog_prices()
+        assert float(g._cat[code]["unit_price"]) == 123456
+        await g.set_shop_discount(1, 20)
+        assert await g.get_shop_discount_pct() == 20
+        # second discount replaces
+        await g.set_shop_discount(1, 50)
+        assert await g.get_shop_discount_pct() == 50
+        await g.set_shop_discount(1, 0)
+        assert await g.get_shop_discount_pct() == 0
+        from modules.ng.alliances import create_cost
+        assert create_cost(2, 100_000_000) == 4_000_000
+        assert create_cost(20, 5_000_000_000) <= 20_000_000
+        await db.close()
+    run(_t())
