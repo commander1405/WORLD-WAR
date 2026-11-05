@@ -36,6 +36,7 @@ BTN_ABOUT = "ℹ️ درباره ما"
 BTN_GUIDE = "📖 راهنمای بازی"
 BTN_REF = "🎁 دعوت کردن"
 BTN_ALLY = "🤝 اتحادها"
+BTN_CTRL = "🏛 کنترل کشور"
 BTN_TREATY = "⚖ پیمان‌ها"
 
 _pending: dict[int, dict] = {}
@@ -81,7 +82,7 @@ def cancel_row():
 MENU_TEXTS = {
     BTN_MY, BTN_ECO, BTN_SHOP, BTN_INV, BTN_MKT, BTN_TRADE, BTN_DIPLO,
     BTN_PEACE, BTN_ATTACK, BTN_STMT, BTN_WORLD, BTN_REPORT, BTN_PICK,
-    BTN_OWNER, BTN_WORKSHOP, BTN_ABOUT, BTN_GUIDE, BTN_REF, BTN_ALLY, BTN_TREATY,
+    BTN_OWNER, BTN_WORKSHOP, BTN_ABOUT, BTN_GUIDE, BTN_REF, BTN_ALLY, BTN_CTRL, BTN_TREATY,
     "/start", "شروع", "منو", "menu", "/admin", "/owner", "/panel",
 }
 
