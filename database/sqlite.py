@@ -32,19 +32,50 @@ class SQLiteDatabase(Database):
         self._tx_depth = 0
 
     async def connect(self) -> None:
+        """Open SQLite. Journal-mode PRAGMAs must run outside any transaction."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self._path)
         self._db.row_factory = aiosqlite.Row
-        await self._db.execute("PRAGMA foreign_keys = ON")
-        # Single-file mode on phone: avoid .db-wal/.db-shm looking like extra databases.
-        # Data safety is preserved; checkpoint any leftover WAL on open.
+        # aiosqlite/sqlite3 may open an implicit transaction after the first
+        # statement. journal_mode cannot change inside a transaction, so force
+        # autocommit for connection setup only.
         try:
-            await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._db.isolation_level = None  # autocommit
         except Exception:
             pass
-        await self._db.execute("PRAGMA journal_mode = DELETE")
-        await self._db.execute("PRAGMA synchronous = NORMAL")
-        await self._db.commit()
+        try:
+            # End any residual transaction from a previous crash/client.
+            await self._db.commit()
+        except Exception:
+            try:
+                await self._db.rollback()
+            except Exception:
+                pass
+
+        await self._db.execute("PRAGMA foreign_keys = ON")
+        # Keep WAL: better durability/concurrency on Android; .wal/.shm are not
+        # separate databases — they are part of the same DB file set.
+        try:
+            cur = await self._db.execute("PRAGMA journal_mode = WAL")
+            row = await cur.fetchone()
+            mode = (row[0] if row else "?")
+            log.info("SQLite journal_mode=%s", mode)
+        except Exception:
+            log.exception("Could not set journal_mode=WAL; continuing with current mode")
+        try:
+            await self._db.execute("PRAGMA synchronous = NORMAL")
+            await self._db.execute("PRAGMA temp_store = MEMORY")
+            # Non-blocking checkpoint; never fails the whole connect.
+            await self._db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception:
+            log.debug("optional PRAGMA setup skipped", exc_info=True)
+
+        # Restore default deferred transaction behavior for application code.
+        try:
+            self._db.isolation_level = ""  # deferred
+        except Exception:
+            pass
+        self._tx_depth = 0
         log.info("SQLite ready at %s", self._path)
 
     async def close(self) -> None:
@@ -87,19 +118,32 @@ class SQLiteDatabase(Database):
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Database]:
+        """Nested-safe transaction. Outer frame owns BEGIN/COMMIT/ROLLBACK."""
         db = self._db_or_raise()
-        if self._tx_depth == 0:
+        outer = self._tx_depth == 0
+        if outer:
+            # Ensure we are not already in an implicit txn before BEGIN.
+            try:
+                await db.commit()
+            except Exception:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
             await db.execute("BEGIN")
         self._tx_depth += 1
         try:
             yield self
             self._tx_depth -= 1
-            if self._tx_depth == 0:
+            if outer:
                 await db.commit()
         except Exception:
             self._tx_depth = max(0, self._tx_depth - 1)
-            if self._tx_depth == 0:
-                await db.rollback()
+            if outer:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
             raise
 
     async def health_check(self) -> bool:
