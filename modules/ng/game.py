@@ -43,6 +43,18 @@ class Game:
                 """,
                 (now, json.dumps(self._default_logs()), self.group_id),
             )
+        for stmt in (
+            "ALTER TABLE ng_countries ADD COLUMN double_hp INTEGER NOT NULL DEFAULT 0",
+            """CREATE TABLE IF NOT EXISTS ng_defense_hits (
+                country_code TEXT PRIMARY KEY,
+                hits INTEGER NOT NULL DEFAULT 0,
+                break_at INTEGER NOT NULL DEFAULT 3
+            )""",
+        ):
+            try:
+                await self.db.execute(stmt)
+            except Exception:
+                pass
         await self._seed_catalog()
         await self._seed_countries()
         await self.ensure_un_country()
@@ -58,6 +70,18 @@ class Game:
 
     async def ensure_shop_catalog(self) -> None:
         """Re-run catalog seed so new items appear without full world reset."""
+        for stmt in (
+            "ALTER TABLE ng_countries ADD COLUMN double_hp INTEGER NOT NULL DEFAULT 0",
+            """CREATE TABLE IF NOT EXISTS ng_defense_hits (
+                country_code TEXT PRIMARY KEY,
+                hits INTEGER NOT NULL DEFAULT 0,
+                break_at INTEGER NOT NULL DEFAULT 3
+            )""",
+        ):
+            try:
+                await self.db.execute(stmt)
+            except Exception:
+                pass
         await self._seed_catalog()
 
     async def _seed_catalog(self) -> None:
@@ -1207,6 +1231,12 @@ class Game:
             await self.alliances.on_country_destroyed(defender)
             await self.broadcast_log("destroy", f"💥 کشور {def_name} نابود شد.")
         try:
+            wear = await self.apply_defense_wear(defender)
+            if wear:
+                report = report + "\n\n⚠️ " + wear
+        except Exception:
+            pass
+        try:
             warn = await self.alliances.check_betrayal_on_attack(pid, attacker, defender)
             if warn:
                 report = report + "\n\n" + warn
@@ -1466,18 +1496,25 @@ class Game:
         if not c:
             return "کشور یافت نشد."
         npt = "عضو پیمان منع گسترش سلاح‌های هسته‌ای" if int(c["npt_member"]) else "غیرعضو پیمان منع گسترش"
-        return (
-            f"{c.get('flag') or ''} {c['name_fa']}\n"
-            f"👑 رهبر: {c['leader_fa']} ({c['leader_title_fa']})\n"
-            f"🏙 پایتخت: {c['capital_fa']}\n"
-            f"💵 پول: {c['currency_name_fa']}\n"
-            f"💰 خزانه: {int(float(c['treasury'])):,}\n"
-            f"📈 درآمد روزانه: {int(float(c['daily_income'])):,}\n"
-            f"📉 هزینه روزانه: {int(float(c['daily_expense'])):,}\n"
-            f"❤️ سلامت: {int(float(c['hp']))}/{int(float(c['max_hp']))}\n"
-            f"☢ {npt}\n"
-            f"بازیکن: {'دارد' if c.get('owner_player_id') else 'آزاد'}"
-        )
+        dbl = int(c.get("double_hp") or 0) == 1
+        hp_line = f"❤️ سلامت: {int(float(c['hp']))}/{int(float(c['max_hp']))}"
+        if dbl:
+            hp_line += " ×۲"
+        dbl_line = "جان ۲ برابر: فعال ✅" if dbl else "جان ۲ برابر: غیرفعال"
+        parts = [
+            f"{c.get('flag') or ''} {c['name_fa']}",
+            f"👑 رهبر: {c['leader_fa']} ({c['leader_title_fa']})",
+            f"🏙 پایتخت: {c['capital_fa']}",
+            f"💵 پول: {c['currency_name_fa']}",
+            f"💰 خزانه: {int(float(c['treasury'])):,}",
+            f"📈 درآمد روزانه: {int(float(c['daily_income'])):,}",
+            f"📉 هزینه روزانه: {int(float(c['daily_expense'])):,}",
+            hp_line,
+            f"🧬 {dbl_line}",
+            f"☢ {npt}",
+            f"بازیکن: {'دارد' if c.get('owner_player_id') else 'آزاد'}",
+        ]
+        return "\n".join(parts)
 
     async def inventory_text(self, code: str) -> str:
         rows = await self.db.fetch(
@@ -2940,6 +2977,97 @@ class Game:
 
 
     # ---------- alliances (active peace) ----------
+
+    async def set_double_hp(self, actor: int, code: str, enabled: bool) -> str:
+        if not self.is_owner(actor):
+            raise GameError("فقط مالک")
+        c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
+        if not c:
+            raise GameError("کشور یافت نشد")
+        cur = int(c.get("double_hp") or 0) == 1
+        if enabled and cur:
+            return "جان ۲ برابر از قبل فعال است."
+        if not enabled and not cur:
+            return "جان ۲ برابر از قبل غیرفعال است."
+        hp = float(c["hp"])
+        mx = float(c["max_hp"])
+        if enabled:
+            new_mx = mx * 2
+            new_hp = min(hp * 2, new_mx)
+            flag = 1
+            msg = f"✅ جان ۲ برابر برای {c['name_fa']} فعال شد.\nسلامت: {int(new_hp)}/{int(new_mx)} ×۲"
+        else:
+            new_mx = max(1.0, mx / 2.0)
+            new_hp = min(hp / 2.0 if cur else hp, new_mx)
+            # when disabling, scale current hp back proportionally
+            new_hp = min(hp / 2.0, new_mx)
+            flag = 0
+            msg = f"✅ جان ۲ برابر برای {c['name_fa']} غیرفعال شد.\nسلامت: {int(new_hp)}/{int(new_mx)}"
+        await self.db.execute(
+            "UPDATE ng_countries SET hp=$1, max_hp=$2, double_hp=$3 WHERE country_code=$4",
+            (new_hp, new_mx, flag, code),
+        )
+        await self.admin_log(actor, "double_hp", f"{code}={flag}")
+        return msg
+
+    async def apply_defense_wear(self, code: str) -> str | None:
+        """After being attacked, accumulate hits; every 3–5 hits destroy 1 defense unit."""
+        import random
+        row = await self.db.fetchrow(
+            "SELECT * FROM ng_defense_hits WHERE country_code=$1", (code,)
+        )
+        if not row:
+            break_at = random.randint(3, 5)
+            try:
+                await self.db.execute(
+                    "INSERT INTO ng_defense_hits (country_code, hits, break_at) VALUES ($1,$2,$3)",
+                    (code, 1, break_at),
+                )
+            except Exception:
+                pass
+            return None
+        hits = int(row["hits"]) + 1
+        break_at = int(row["break_at"] or 3)
+        if hits < break_at:
+            await self.db.execute(
+                "UPDATE ng_defense_hits SET hits=$1 WHERE country_code=$2",
+                (hits, code),
+            )
+            return None
+        inv = await self.db.fetch(
+            "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (code,)
+        )
+        defense = []
+        for r in inv:
+            meta = self._cat.get(r["item_code"], {})
+            if meta.get("category") == "defense":
+                defense.append(r)
+        broken_name = None
+        if defense:
+            defense.sort(key=lambda r: -float(r["quantity"]))
+            victim = defense[0]
+            meta = self._cat.get(victim["item_code"], {})
+            broken_name = meta.get("name_fa") or victim["item_code"]
+            left = float(victim["quantity"]) - 1
+            if left <= 0:
+                await self.db.execute(
+                    "DELETE FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                    (code, victim["item_code"]),
+                )
+            else:
+                await self.db.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                    (left, code, victim["item_code"]),
+                )
+        new_break = random.randint(3, 5)
+        await self.db.execute(
+            "UPDATE ng_defense_hits SET hits=0, break_at=$1 WHERE country_code=$2",
+            (new_break, code),
+        )
+        if broken_name:
+            return f"پدافند «{broken_name}» پس از فشار حملات از بین رفت و باید دوباره خریداری شود."
+        return None
+
     async def list_alliances(self) -> list[dict]:
         return await self.alliances.list_active()
 

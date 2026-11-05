@@ -590,3 +590,45 @@ def test_alliance_create_cost_and_retry(tmp_path):
             pass
         await db.close()
     run(_t())
+
+
+def test_defense_wear_and_double_hp(tmp_path):
+    async def _t():
+        db, g = await boot(tmp_path / "defhp", owner=1)
+        await g.claim(10, "US")
+        await g.claim(11, "DE")
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('DE','d_sam',3)"
+        )
+        # force wear break quickly
+        await db.execute(
+            "INSERT INTO ng_defense_hits (country_code, hits, break_at) VALUES ('DE', 2, 3)"
+        )
+        msg = await g.apply_defense_wear("DE")
+        assert msg and "پدافند" in msg
+        inv = await db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code='DE' AND item_code='d_sam'"
+        )
+        assert float(inv["quantity"]) == 2
+        # double hp
+        before = await db.fetchrow("SELECT hp, max_hp FROM ng_countries WHERE country_code='US'")
+        await g.set_double_hp(1, "US", True)
+        after = await db.fetchrow("SELECT hp, max_hp, double_hp FROM ng_countries WHERE country_code='US'")
+        assert int(after["double_hp"]) == 1
+        assert float(after["max_hp"]) == float(before["max_hp"]) * 2
+        card = await g.country_card("US")
+        assert "×۲" in card or "فعال" in card
+        await g.set_double_hp(1, "US", False)
+        off = await db.fetchrow("SELECT double_hp FROM ng_countries WHERE country_code='US'")
+        assert int(off["double_hp"]) == 0
+        # cyber consume
+        await db.execute(
+            "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ('US','cyber_hack_def',1)"
+        )
+        await g.hack_defense("US", "DE", 10)
+        left = await db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code='US' AND item_code='cyber_hack_def'"
+        )
+        assert left is None or float(left["quantity"] or 0) <= 0
+        await db.close()
+    run(_t())

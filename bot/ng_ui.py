@@ -251,6 +251,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("بن کاربر", "ng:oban"), ("آنبن کاربر", "ng:ounban")],
                     [("تغییر پول کشور", "ng:omoney")],
                     [("💰 گرفتن مالیات", "ng:otax"), ("⚖️ محکوم کردن کشور", "ng:ocondemn")],
+                    [("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
                     [("🔴 ریست کامل جهان", "ng:oreset1")],
                 ]
                 await reply(message, "🛡 پنل مالک / سازمان ملل\nدستورات: /admin /owner /panel", ik(rows))
@@ -885,7 +886,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -1683,6 +1684,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("➕ NPT", f"ng:ounptadd:{tid}"), ("➖ NPT", f"ng:ounptdel:{tid}")],
                     [("💵 دادن پول", f"ng:ougive:{tid}"), ("💸 گرفتن پول", f"ng:outake:{tid}")],
                     [("🧾 مالیات از کاربر", f"ng:outax:{tid}")],
+                    [("🧬 جان ×۲ روشن", f"ng:oudblon:{tid}"), ("🧬 جان ×۲ خاموش", f"ng:oudbloff:{tid}")],
                     [("♻️ ریست کردن کاربر", f"ng:oureset:{tid}")],
                     [("⬅️ لیست کاربران", "ng:o:players:0")],
                 ]
