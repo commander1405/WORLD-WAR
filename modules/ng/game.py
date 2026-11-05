@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from database.interface import Database
 from modules.ng.catalog import CATALOG, CAT_FA
+from modules.ng import equipment as eq
 from modules.ng.alliances import AllianceService, AllianceError, create_cost, DESTROY_WAIT_SEC
 from modules.ng.control import ControlService, ControlError
 
@@ -857,13 +858,14 @@ class Game:
         )
         total = 0.0
         for r in inv:
-            meta = self._cat.get(r["item_code"])
+            code_i = r["item_code"]
+            meta = self._cat.get(code_i) or eq.meta(code_i)
             if not meta:
                 continue
-            cat = meta["category"]
-            code_i = r["item_code"]
-            if cat == "defense" or code_i in ("m_sam_patriot", "m_sam_s400", "d_sam", "d_radar"):
-                total += float(meta.get("power_score") or 0) * float(r["quantity"])
+            cat = meta.get("category")
+            q = float(r["quantity"])
+            if cat == "defense" or str(code_i).startswith("m_sam") or code_i in ("d_radar", "d_sam"):
+                total += eq.defense_power_for_unit(code_i, q)
         return total
 
     async def active_cyber_disable_ratio(self, code: str) -> float:
@@ -1087,29 +1089,45 @@ class Game:
 
 
     async def available_force(self, code: str, kind: str) -> tuple[float, list]:
-        """Return (total_power, units[{item, qty, power}]) for free (non-zero) inventory."""
+        """Return (total attack power, units) using independent item damage stats."""
         inv = await self.db.fetch(
             "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (code,)
         )
         units = []
         total = 0.0
         for r in inv:
-            meta = self._cat.get(r["item_code"])
+            code_i = r["item_code"]
+            meta = self._cat.get(code_i) or eq.meta(code_i)
             if not meta:
                 continue
-            cat = meta["category"]
-            if kind == "ground" and cat not in ("ground", "defense"):
-                continue
-            if kind in ("air", "sea", "defense") and cat != kind:
-                continue
-            if kind not in ("ground", "air", "sea", "defense"):
-                continue
-            ps = float(meta.get("power_score") or 0)
-            if ps <= 0 and cat != "defense":
-                continue
+            cat = meta.get("category")
             q = float(r["quantity"])
-            total += ps * q
-            units.append({"item_code": r["item_code"], "quantity": q, "power": ps})
+            if q <= 0:
+                continue
+            ctype = eq.consumption_type(code_i)
+            if ctype in ("passive", "building"):
+                continue
+            if cat == "missile":
+                if not eq.missile_matches_kind(code_i, kind):
+                    continue
+            elif kind == "ground" and cat not in ("ground",):
+                continue
+            elif kind in ("air", "sea") and cat != kind:
+                continue
+            elif kind == "defense" and cat not in ("defense", "missile"):
+                continue
+            dmg = eq.damage_of(code_i)
+            if dmg <= 0 and kind != "defense":
+                continue
+            power = eq.attack_power_for_unit(code_i, q)
+            total += power
+            units.append({
+                "item_code": code_i,
+                "quantity": q,
+                "power": dmg,
+                "consumption_type": ctype,
+                "name_fa": meta.get("name_fa") or code_i,
+            })
         return total, units
 
     async def can_attack(self, code: str, kind: str | None = None) -> tuple[bool, str]:
@@ -1180,69 +1198,159 @@ class Game:
                 except Exception:
                     pass
 
-            # forces from inventory (locked by transaction)
+            # forces from inventory (locked by transaction) — independent stats
             inv = await tx.fetch(
                 "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (attacker,)
             )
-            units = []
+            units = []  # (code, qty, engage_qty)
             total_power = 0.0
             for r in inv:
-                meta_i = self._cat.get(r["item_code"])
+                ic = r["item_code"]
+                meta_i = self._cat.get(ic) or eq.meta(ic)
                 if not meta_i:
                     continue
-                cat = meta_i["category"]
-                if kind == "ground" and cat not in ("ground", "defense"):
-                    continue
-                if kind in ("air", "sea") and cat != kind:
-                    continue
-                ps = float(meta_i.get("power_score") or 0)
-                if ps <= 0:
-                    continue
+                cat = meta_i.get("category")
                 q = float(r["quantity"])
-                total_power += ps * q
-                units.append((r["item_code"], q, ps))
+                if q <= 0:
+                    continue
+                ctype = eq.consumption_type(ic)
+                if ctype in ("passive", "building"):
+                    continue
+                if cat == "specialist":
+                    units.append((ic, q, min(1.0, q), "specialist"))
+                    continue
+                if cat == "missile":
+                    if not eq.missile_matches_kind(ic, kind):
+                        continue
+                elif kind == "ground" and cat != "ground":
+                    continue
+                elif kind in ("air", "sea") and cat != kind:
+                    continue
+                elif cat not in ("ground", "air", "sea", "missile"):
+                    continue
+                dmg = eq.damage_of(ic)
+                if dmg <= 0:
+                    continue
+                eng = eq.engage_quantity(q, percent)
+                if eng <= 0:
+                    continue
+                if eng > q:
+                    eng = q
+                power = eq.attack_power_for_unit(ic, eng)
+                total_power += power
+                units.append((ic, q, eng, ctype))
 
-            if total_power <= 0:
+            combat_units = [u for u in units if u[3] != "specialist"]
+            if not combat_units or total_power <= 0:
                 raise GameError("نیروی نظامی قابل‌استفاده برای این نوع حمله ندارید.")
 
-            # deploy percent of units (casualties / commitment)
-            ratio = percent / 100.0
-            engaged_power = total_power * ratio
-            for item_code, q, ps in units:
-                use = q * ratio
-                if use <= 0:
+            engaged_power = total_power
+            # Pre-check stock before applying
+            for ic, q, eng, ctype in combat_units:
+                if eng > q + 1e-9:
+                    raise GameError(f"موجودی {ic} کافی نیست.")
+
+            # Specialist boost (optional one charge)
+            specialist_used = []
+            logistics_bonus = False
+            for ic, q, eng, ctype in units:
+                if ctype != "specialist":
                     continue
-                # consume 10% of engaged as losses (min 0)
-                loss = max(0.0, use * 0.1)
-                new_q = max(0.0, q - loss)
+                if q < 1:
+                    continue
+                # auto-use at most one specialist charge if available
+                meta_i = self._cat.get(ic) or {}
+                name = meta_i.get("name_fa") or ic
+                # consume 1 charge
+                new_q = max(0.0, q - 1.0)
                 await tx.execute(
                     "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
-                    (new_q, attacker, item_code),
+                    (new_q, attacker, ic),
                 )
+                specialist_used.append(name)
+                if ic == "sp_logistics":
+                    logistics_bonus = True
+                if ic == "sp_air" and kind == "air":
+                    engaged_power *= 1.15
+                if ic == "sp_naval" and kind == "sea":
+                    engaged_power *= 1.15
+                if ic == "sp_intel":
+                    engaged_power *= 1.08
+                break  # one specialist type per attack
 
+            # Tentative victory for attrition rates (refined after dp)
+            # First compute defender power
             dp_units = await tx.fetch(
                 "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (defender,)
             )
             dp = 0.0
             for r in dp_units:
-                meta_i = self._cat.get(r["item_code"])
+                ic = r["item_code"]
+                meta_i = self._cat.get(ic) or eq.meta(ic)
                 if not meta_i:
                     continue
-                if meta_i["category"] in (kind, "defense") or (kind == "ground" and meta_i["category"] == "defense"):
-                    dp += float(meta_i.get("power_score") or 0) * float(r["quantity"])
+                cat = meta_i.get("category")
+                q = float(r["quantity"])
+                if cat in ("defense",) or (cat == "missile" and ic.startswith("m_sam")):
+                    dp += eq.defense_power_for_unit(ic, q)
+                elif cat == kind:
+                    dp += eq.defense_power_for_unit(ic, q) * 0.5 + eq.damage_of(ic) * q * 0.15
 
             ap = engaged_power
-            # damage scales with power difference
             if ap <= 0:
                 raise GameError("نیروی اعزامی صفر است.")
+            victory_guess = ap >= dp * 0.85
+
+            # Consume attacker equipment according to type
+            consumption_log = []
+            for ic, q, eng, ctype in combat_units:
+                loss = eq.consume_amount(
+                    ic, eng, victory=victory_guess, specialist_bonus_logistics=logistics_bonus
+                )
+                if loss <= 0:
+                    continue
+                if loss > q:
+                    loss = q
+                new_q = max(0.0, q - loss)
+                await tx.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                    (new_q, attacker, ic),
+                )
+                nm = (self._cat.get(ic) or {}).get("name_fa") or ic
+                consumption_log.append(f"{nm}: −{loss:.2f} (باقی {new_q:.2f})")
+
+            # Defender expendable SAM may intercept and consume some
+            for r in dp_units:
+                ic = r["item_code"]
+                if eq.consumption_type(ic) != "expendable":
+                    continue
+                if not str(ic).startswith("m_sam"):
+                    continue
+                q = float(r["quantity"])
+                if q < 1:
+                    continue
+                use = min(q, max(1.0, q * 0.1))
+                new_q = max(0.0, q - use)
+                await tx.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                    (new_q, defender, ic),
+                )
+                break
+
             raw = (ap - dp * 0.55) * 0.35 + 15
-            damage = max(5.0, min(200.0, raw))
-            # air defense interception (never 100%)
+            damage = max(5.0, min(220.0, raw))
             cover, def_meta = await self.defense_coverage(defender, kind)
             intercepted = damage * cover
             damage = max(3.0, damage - intercepted)
             victory = ap >= dp * 0.85
             result = f"پیروزی {attacker}" if victory else f"برتری دفاعی {defender}"
+            # stash logs on self for report (per-call local via nonlocal later)
+            self._last_combat_log = {
+                "consumption": consumption_log,
+                "specialists": specialist_used,
+                "ap": ap,
+                "dp": dp,
+            }
 
             new_hp = max(0.0, float(d["hp"]) - damage)
             await tx.execute(
@@ -1345,6 +1453,18 @@ class Game:
 
         atk_name = await self.country_label(attacker)
         def_name = await self.country_label(defender)
+        clog = getattr(self, "_last_combat_log", {}) or {}
+        cons_lines = clog.get("consumption") or []
+        sp_lines = clog.get("specialists") or []
+        extra_parts = []
+        if cons_lines:
+            extra_parts.append("📦 مصرف تجهیزات مهاجم:")
+            extra_parts.extend(cons_lines[:12])
+        if sp_lines:
+            extra_parts.append("متخصص: " + "، ".join(sp_lines))
+        if clog.get("ap") is not None:
+            extra_parts.append(f"قدرت حمله: {clog['ap']:.0f} | قدرت دفاع: {clog.get('dp', 0):.0f}")
+        extra = ("\n" + "\n".join(extra_parts)) if extra_parts else ""
         report = (
             f"⚔️ گزارش درگیری\n\n"
             f"مهاجم: {atk_name}\nمدافع: {def_name}\nنوع: {kind}\nشدت: {int(percent)}٪\n"
@@ -1354,8 +1474,8 @@ class Game:
             f"سلامت فعلی مدافع: {int(max(0, new_hp))}\n"
             f"غنیمت نقدی: {int(loot):,}"
             + (" (غنیمتی نبود)" if loot <= 0 and victory else "")
+            + extra
         )
-        await self.log_activity("attack", report.replace("\n", " | "), attacker, pid)
         await self.broadcast_log("attack", report)
         if new_hp <= 0:
             await self.alliances.on_country_destroyed(defender)
@@ -1771,17 +1891,67 @@ class Game:
         ]
         return "\n".join(parts)
 
+
+    async def add_inventory(self, country_code: str, item_code: str, qty: float, tx=None) -> None:
+        """Add stock; specialists grant 2 charges per purchased unit."""
+        db = tx or self.db
+        meta = self._cat.get(item_code) or eq.meta(item_code) or {}
+        add = float(qty)
+        if meta.get("consumption_type") == "specialist" or meta.get("category") == "specialist":
+            add = float(qty) * eq.SPECIALIST_CHARGES_PER_UNIT
+        inv = await db.fetchrow(
+            "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+            (country_code, item_code),
+        )
+        if inv:
+            await db.execute(
+                "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                (float(inv["quantity"]) + add, country_code, item_code),
+            )
+        else:
+            await db.execute(
+                "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,$2,$3)",
+                (country_code, item_code, add),
+            )
+
     async def inventory_text(self, code: str) -> str:
         rows = await self.db.fetch(
             "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0 ORDER BY item_code",
             (code,),
         )
-        lines = ["📦 انبار من", ""]
+        lines = ["📦 انبار نظامی و تجهیزات", ""]
         if not rows:
             lines.append("خالی")
+            return "\n".join(lines)
+        by_cat: dict = {}
         for r in rows:
-            meta = self._cat.get(r["item_code"], {"name_fa": r["item_code"]})
-            lines.append(f"• {meta['name_fa']}: {int(float(r['quantity']))}")
+            meta = self._cat.get(r["item_code"]) or eq.meta(r["item_code"]) or {
+                "name_fa": r["item_code"], "category": "other"
+            }
+            cat = meta.get("category") or "other"
+            by_cat.setdefault(cat, []).append((meta, r))
+        order = ["ground", "air", "sea", "missile", "defense", "specialist", "cyber", "nuclear", "mine", "infra", "other"]
+        for cat in order:
+            items = by_cat.get(cat)
+            if not items:
+                continue
+            lines.append(CAT_FA.get(cat, cat))
+            for meta, r in items:
+                q = float(r["quantity"])
+                ctype = eq.consumption_type(r["item_code"])
+                if ctype == "specialist":
+                    extra = f" | شارژ باقیمانده: {int(q)} (هر خرید=۲ استفاده)"
+                elif ctype == "expendable":
+                    extra = " | مصرفی"
+                elif ctype == "sortie":
+                    extra = " | مأموریتی"
+                else:
+                    extra = ""
+                dmg, dfn = eq.damage_of(r["item_code"]), eq.defense_of(r["item_code"])
+                lines.append(
+                    f"• {meta.get('name_fa')}: {q:g} | آسیب {dmg:g} | دفاع {dfn:g}{extra}"
+                )
+            lines.append("")
         return "\n".join(lines)
 
 
