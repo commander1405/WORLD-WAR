@@ -2401,11 +2401,14 @@ def register_handlers(bot, app_ctx: dict):
                     ]
                     rows = []
                     for p in players:
-                        cc = p.get("country_code")
-                        cname = await game.country_name_only(cc) if cc else "نامشخص"
-                        un = p.get("username") or p["player_id"]
-                        label = f"{un} | {cname}"
-                        rows.append([(label[:40], f"ng:ou:{p['player_id']}")])
+                        cname = p.get("country_label") or (
+                            await game.country_name_only(p.get("country_code"))
+                            if p.get("country_code") else "بدون کشور"
+                        )
+                        un = p.get("display_name") or p.get("username") or "بدون‌نام"
+                        pid_s = p["player_id"]
+                        label = f"{un} | {cname} | {pid_s}"
+                        rows.append([(label[:48], f"ng:ou:{pid_s}")])
                     nav = []
                     if page > 0:
                         nav.append(("⬅️ قبلی", f"ng:o:players:{page-1}"))

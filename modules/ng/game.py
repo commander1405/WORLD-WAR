@@ -376,8 +376,21 @@ class Game:
         if code == UN_CODE:
             raise GameError("کشور سازمان ملل فقط متعلق به مالک بازی است و قابل انتخاب نیست.")
         p = await self.touch_player(pid)
-        if p.get("country_code"):
+        # live ownership beats stale ng_players.country_code cache
+        live = await self.resolve_country_for_player(int(pid))
+        if live:
+            if (p.get("country_code") or "") != live:
+                await self.db.execute(
+                    "UPDATE ng_players SET country_code=$1 WHERE player_id=$2",
+                    (live, int(pid)),
+                )
             raise GameError("شما هم‌اکنون یک کشور دارید.")
+        # clear stale cache if no live ownership
+        if p.get("country_code"):
+            await self.db.execute(
+                "UPDATE ng_players SET country_code=NULL WHERE player_id=$1",
+                (int(pid),),
+            )
         cd = p.get("destroy_cooldown_until")
         if cd:
             try:
@@ -411,7 +424,12 @@ class Game:
             if not check or int(check["owner_player_id"]) != pid:
                 raise GameError("کشور در لحظه آخر توسط بازیکن دیگری گرفته شد.")
             await tx.execute(
-                "UPDATE ng_players SET country_code=$1 WHERE player_id=$2", (code, pid)
+                """
+                UPDATE ng_players
+                SET country_code=$1, destroy_cooldown_until=NULL
+                WHERE player_id=$2
+                """,
+                (code, pid),
             )
         await self.log_activity("claim", f"انتخاب کشور {await self.country_name_only(code)}", code, pid)
         return await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
@@ -3495,13 +3513,57 @@ class Game:
         return {"total": total, "active_today": active_today}
 
     async def list_players_page(self, page: int = 0) -> tuple[list[dict], int]:
-        rows = await self.db.fetch(
-            "SELECT * FROM ng_players ORDER BY player_id"
+        """Always refresh country from live ownership so owner panel stays accurate."""
+        rows = await self.db.fetch("SELECT * FROM ng_players ORDER BY player_id")
+        enriched: list[dict] = []
+        for raw in rows:
+            p = dict(raw)
+            pid = int(p["player_id"])
+            try:
+                live = await self.resolve_country_for_player(
+                    pid, include_un_for_owner=(self.owner_id and pid == int(self.owner_id))
+                )
+            except Exception:
+                live = p.get("country_code")
+            # keep ng_players.country_code in sync with reality
+            cached = p.get("country_code")
+            if live and cached != live:
+                try:
+                    await self.db.execute(
+                        "UPDATE ng_players SET country_code=$1 WHERE player_id=$2",
+                        (live, pid),
+                    )
+                except Exception:
+                    pass
+                p["country_code"] = live
+            elif not live and cached:
+                try:
+                    await self.db.execute(
+                        "UPDATE ng_players SET country_code=NULL WHERE player_id=$1",
+                        (pid,),
+                    )
+                except Exception:
+                    pass
+                p["country_code"] = None
+            else:
+                p["country_code"] = live or cached
+            # human label
+            if p.get("country_code"):
+                try:
+                    p["country_label"] = await self.country_label(p["country_code"])
+                except Exception:
+                    p["country_label"] = str(p["country_code"])
+            else:
+                p["country_label"] = "بدون کشور"
+            enriched.append(p)
+        # players with country first, then by id
+        enriched.sort(
+            key=lambda x: (0 if x.get("country_code") else 1, int(x["player_id"]))
         )
-        total = len(rows)
+        total = len(enriched)
         page = max(0, int(page))
         start = page * self.PAGE_SIZE
-        return rows[start:start + self.PAGE_SIZE], total
+        return enriched[start:start + self.PAGE_SIZE], total
 
 
     @staticmethod
