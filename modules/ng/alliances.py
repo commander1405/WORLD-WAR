@@ -402,10 +402,20 @@ class AllianceService:
             (founder_pid,),
         )
         if not m:
-            raise AllianceError("فقط بنیان‌گذار")
+            raise AllianceError("فقط بنیان‌گذار می‌تواند ظرفیت را افزایش دهد.")
         a = await self.get(m["alliance_id"])
-        new_max = max(int(a["max_members"]) + 1, min(MAX_MEMBERS, int(new_max)))
-        cost = expand_member_cost(int(a["max_members"]), new_max)
+        old = int(a["max_members"] or 2)
+        try:
+            new_max = int(new_max)
+        except (TypeError, ValueError) as e:
+            raise AllianceError("عدد ظرفیت نامعتبر است.") from e
+        if new_max <= old:
+            raise AllianceError(
+                f"ظرفیت باید بیشتر از فعلی باشد.\nفعلی: {old} — واردشده: {new_max}\nمثال معتبر: {old + 1}"
+            )
+        if new_max > MAX_MEMBERS:
+            raise AllianceError(f"حداکثر ظرفیت اعضا {MAX_MEMBERS} نفر است.")
+        cost = expand_member_cost(old, new_max)
         c = await self.db.fetchrow(
             "SELECT treasury FROM ng_countries WHERE country_code=$1", (m["country_code"],)
         )
@@ -425,7 +435,7 @@ class AllianceService:
                 "INSERT INTO ng_alliance_tx (id, alliance_id, kind, amount, actor_player_id, country_code, note, created_at) VALUES ($1,$2,'expand_members',$3,$4,$5,$6,$7)",
                 (int(tid["id"]), a["id"], cost, founder_pid, m["country_code"], str(new_max), now),
             )
-        return f"✅ ظرفیت اعضا: {new_max} | هزینه: {cost:,}"
+        return f"✅ ظرفیت اعضا: {old} → {new_max} | هزینه: {cost:,}"
 
     async def expand_treasury(self, founder_pid: int, new_cap: float) -> str:
         m = await self.db.fetchrow(

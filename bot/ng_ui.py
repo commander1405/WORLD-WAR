@@ -277,6 +277,7 @@ def register_handlers(bot, app_ctx: dict):
                 rows = [
                     [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
                     [("🌐 مدیریت اتحادها", "ng:oally"), ("📊 آمار دعوت", "ng:orefstats")],
+                    [("💵 پول همگانی", "ng:ogiveall"), ("💰 پرداخت درآمد روزانه", "ng:odaily")],
                     [("جنگ باز", "ng:owar:1"), ("جنگ بسته", "ng:owar:0")],
                     [("هسته‌ای فعال", "ng:onuke:1"), ("هسته‌ای خاموش", "ng:onuke:0")],
                     [("بیانیه‌ها", "ng:ostmt"), ("درخواست‌های NPT", "ng:onpt")],
@@ -421,12 +422,13 @@ def register_handlers(bot, app_ctx: dict):
                     await reply(message, msg, main_kb(owner))
                     return
                 if kind == "ally_emembers":
-                    _pending.pop(pid, None)
                     try:
-                        msg = await game.alliances.expand_members(pid, int(text.strip()))
+                        raw = text.strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+                        msg = await game.alliances.expand_members(pid, int(raw))
+                        _pending.pop(pid, None)
                     except (AllianceError, GameError, ValueError) as e:
-                        msg = f"❌ {e}"
-                    await reply(message, msg, main_kb(owner))
+                        msg = f"❌ {e}\nدوباره عدد بزرگ‌تر از ظرفیت فعلی را بفرستید."
+                    await reply(message, msg, main_kb(owner) if "✅" in str(msg) else None)
                     return
                 if kind == "ally_etreasury":
                     _pending.pop(pid, None)
@@ -555,6 +557,18 @@ def register_handlers(bot, app_ctx: dict):
                     except GameError as e:
                         msg = f"❌ {e}"
                     await reply(message, msg, main_kb(owner))
+                    return
+                if kind == "owner_give_all":
+                    try:
+                        amount = game.parse_money_amount(text)
+                        msg = await game.admin_give_all_players(pid, amount)
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(owner))
+                    except GameError as e:
+                        await reply(message, f"❌ {e}")
+                    except Exception:
+                        log.exception("owner_give_all")
+                        await reply(message, "❌ خطا در واریز همگانی")
                     return
                 if kind == "admin_money":
                     try:
@@ -1006,7 +1020,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc") or data.startswith("ng:ogiveall") or data.startswith("ng:odaily"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -1788,6 +1802,27 @@ def register_handlers(bot, app_ctx: dict):
             if data == "ng:ounban":
                 _pending[pid] = {"kind": "unban_user"}
                 await out("آیدی عددی یا @username برای رفع بن:")
+                return
+            if data == "ng:ogiveall":
+                _pending[pid] = {"kind": "owner_give_all"}
+                await out(
+                    "💵 واریز همگانی به همه کشورهای بازیکن\n"
+                    "مبلغ یکسان برای هر کشور را بنویسید:\n"
+                    "مثال: 5000000",
+                    ik([cancel_row()]),
+                )
+                return
+            if data == "ng:odaily":
+                try:
+                    n = await game.daily_payout_all()
+                    if n:
+                        await out(f"✅ درآمد روزانه برای {n} کشور پرداخت شد و در گروه اعلام می‌شود.")
+                    else:
+                        today = __import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("Asia/Tehran")).date().isoformat()
+                        await out(f"ℹ️ امروز ({today}) همه کشورها قبلاً درآمد روزانه را گرفته‌اند یا کشوری برای پرداخت نیست.")
+                except Exception as e:
+                    log.exception("odaily")
+                    await out(f"❌ {e}")
                 return
             if data == "ng:omoney":
                 _pending[pid] = {"kind": "admin_money"}

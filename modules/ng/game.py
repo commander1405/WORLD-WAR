@@ -525,14 +525,22 @@ class Game:
         )
 
     async def daily_payout_all(self) -> int:
-        """Pay once per Tehran calendar day: base + buildings + law bonus, modifiers applied."""
+        """Pay once per Tehran calendar day.
+
+        Base grant is protected: maintenance must not wipe the base daily income.
+        Formula: base*mod + max(0,law_bonus) + max(0, buildings - maintenance)
+        """
         today = datetime.now(TEHRAN).date().isoformat()
         countries = await self.db.fetch(
-            "SELECT * FROM ng_countries WHERE owner_player_id IS NOT NULL AND is_destroyed=0"
+            "SELECT * FROM ng_countries WHERE owner_player_id IS NOT NULL AND COALESCE(is_destroyed,0)=0"
         )
         n = 0
+        total_paid = 0.0
+        details = []
         for c in countries:
             code = c["country_code"]
+            if code == UN_CODE:
+                continue
             exists = await self.db.fetchrow(
                 "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
                 (code, today),
@@ -541,18 +549,28 @@ class Game:
                 continue
             try:
                 ctrl = await self.control.ensure_control(code)
-                base = float(ctrl["base_daily_income"] or 20_000_000)
-                law_bonus = await self.control.law_income_bonus(code)
-                mod = await self.control.income_modifier(code)
+                base = float(ctrl.get("base_daily_income") or self.BASE_DAILY_GRANT)
+                if base <= 0:
+                    base = float(self.BASE_DAILY_GRANT)
+                law_bonus = float(await self.control.law_income_bonus(code) or 0)
+                mod = float(await self.control.income_modifier(code) or 1.0)
+                if mod <= 0:
+                    mod = 1.0
             except Exception:
-                base = float(getattr(self, "BASE_DAILY_GRANT", 20_000_000))
+                log.exception("daily control stats for %s", code)
+                base = float(self.BASE_DAILY_GRANT)
                 law_bonus = 0.0
                 mod = 1.0
-            await self.recalc_income(code)
+            try:
+                await self.recalc_income(code)
+            except Exception:
+                log.exception("recalc_income %s", code)
             c2 = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
-            net_buildings = float(c2["daily_income"]) - float(c2["daily_expense"])
-            total = (base + law_bonus + net_buildings) * mod
-            total = max(0.0, total)
+            if not c2:
+                continue
+            net_buildings = float(c2.get("daily_income") or 0) - float(c2.get("daily_expense") or 0)
+            total = (base * mod) + max(0.0, law_bonus) + max(0.0, net_buildings)
+            total = max(float(self.BASE_DAILY_GRANT) * 0.5, total)
             async with self.db.transaction() as tx:
                 again = await tx.fetchrow(
                     "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
@@ -560,24 +578,47 @@ class Game:
                 )
                 if again:
                     continue
+                new_t = float(c2["treasury"] or 0) + total
                 await tx.execute(
                     "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-                    (float(c2["treasury"]) + total, code),
+                    (new_t, code),
                 )
                 await tx.execute(
                     "INSERT INTO ng_daily_payouts (country_code, payout_date, amount) VALUES ($1,$2,$3)",
                     (code, today, total),
                 )
             n += 1
+            total_paid += total
+            label = c2.get("name_fa") or code
+            details.append(f"{label}: +{int(total):,}")
+            oid = c2.get("owner_player_id")
             await self.log_activity(
                 "daily",
-                f"درآمد روزانه: {int(total):,} (ضریب {mod:.2f})",
+                f"درآمد روزانه: {int(total):,} (پایه {int(base):,} × {mod:.2f})",
                 code,
+                int(oid) if oid else None,
             )
             try:
                 await self.control.tick_satisfaction_events(code)
             except Exception:
                 pass
+        if n:
+            sample = "\n".join(details[:12])
+            more = f"\n… و {n - 12} کشور دیگر" if n > 12 else ""
+            try:
+                msg_lines = [
+                    "💰 درآمد روزانه پرداخت شد",
+                    f"تاریخ (تهران): {today}",
+                    f"تعداد کشورها: {n}",
+                    f"جمع کل: {int(total_paid):,}",
+                    "",
+                    *details[:12],
+                ]
+                if n > 12:
+                    msg_lines.append(f"… و {n - 12} کشور دیگر")
+                await self.broadcast_log("daily", chr(10).join(msg_lines))
+            except Exception:
+                log.exception("daily broadcast")
         return n
 
 
@@ -1726,6 +1767,51 @@ class Game:
             f"قبل: {int(res['before']):,} {res['currency']}",
             f"تغییر: {int(res['delta']):+,} {res['currency']}",
             f"موجودی جدید: {int(res['after']):,} {res['currency']}",
+        ])
+
+    async def admin_give_all_players(self, actor: int, amount: float) -> str:
+        """Owner grants the same amount to every owned player country (not UN)."""
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        amount = float(amount)
+        if amount <= 0:
+            raise GameError("مبلغ باید مثبت باشد")
+        if amount > 5_000_000_000:
+            raise GameError("سقف هر واریز همگانی ۵ میلیارد است")
+        rows = await self.db.fetch(
+            "SELECT country_code, name_fa, owner_player_id, treasury FROM ng_countries "
+            "WHERE owner_player_id IS NOT NULL AND country_code<>$1 AND COALESCE(is_destroyed,0)=0",
+            (UN_CODE,),
+        )
+        if not rows:
+            raise GameError("هیچ کشور بازیکنی یافت نشد")
+        ok, fail = 0, 0
+        for r in rows:
+            try:
+                await self.adjust_treasury(
+                    r["country_code"], amount, actor=actor, reason=f"give_all:{actor}"
+                )
+                ok += 1
+            except Exception:
+                log.exception("give_all %s", r["country_code"])
+                fail += 1
+        try:
+            await self.broadcast_log(
+                "admin",
+                chr(10).join([
+                    "💵 واریز همگانی توسط سازمان ملل",
+                    f"مبلغ هر کشور: {int(amount):,}",
+                    f"موفق: {ok} | ناموفق: {fail}",
+                ]),
+            )
+        except Exception:
+            pass
+        await self.admin_log(actor, "give_all", f"amount={amount} ok={ok} fail={fail}")
+        return chr(10).join([
+            "✅ واریز همگانی انجام شد.",
+            f"مبلغ هر کشور: {int(amount):,}",
+            f"موفق: {ok}",
+            f"ناموفق: {fail}",
         ])
 
     async def admin_give_to_player(self, actor: int, target_pid: int, amount: float) -> str:
