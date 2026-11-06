@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from database.interface import Database
 from modules.ng.catalog import CATALOG, CAT_FA
 from modules.ng import equipment as eq
+from modules.ng.legendary import LegendaryService, LegendaryError
 from modules.ng.alliances import AllianceService, AllianceError, create_cost, DESTROY_WAIT_SEC
 from modules.ng.control import ControlService, ControlError
 
@@ -32,6 +33,7 @@ class Game:
         self.group_id = group_id
         self._cat = {c["item_code"]: c for c in CATALOG}
         self.alliances = AllianceService(self)
+        self.legendary = LegendaryService(self)
         self.control = ControlService(self)
 
     # ---------- bootstrap ----------
@@ -77,6 +79,10 @@ class Game:
             """)
         except Exception:
             pass
+        try:
+            await self.legendary.ensure_tables()
+        except Exception:
+            log.exception("legendary ensure")
         await self._seed_catalog()
         await self._seed_countries()
         await self.ensure_un_country()
@@ -514,6 +520,10 @@ class Game:
         return "\n".join(lines), total, items
 
     async def checkout(self, pid: int, country_code: str) -> str:
+        try:
+            await self.legendary.assert_can_shop(country_code)
+        except LegendaryError as e:
+            raise GameError(str(e)) from e
         _, total, items = await self.cart_view(pid, country_code)
         if not items:
             raise GameError("سبد خالی است.")
@@ -631,7 +641,13 @@ class Game:
                 continue
             net_buildings = float(c2.get("daily_income") or 0) - float(c2.get("daily_expense") or 0)
             total = (base * mod) + max(0.0, law_bonus) + max(0.0, net_buildings)
-            total = max(float(self.BASE_DAILY_GRANT) * 0.5, total)
+            try:
+                leg_m = await self.legendary.income_multiplier(code)
+                total *= float(leg_m)
+            except Exception:
+                log.exception("legendary income mult %s", code)
+            total = max(float(self.BASE_DAILY_GRANT) * 0.5 * 0.5, total)  # still non-negative floor softer when cut
+            total = max(0.0, total)
             async with self.db.transaction() as tx:
                 again = await tx.fetchrow(
                     "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
@@ -1233,6 +1249,10 @@ class Game:
         return total, units
 
     async def can_attack(self, code: str, kind: str | None = None) -> tuple[bool, str]:
+        try:
+            await self.legendary.assert_can_attack(code)
+        except LegendaryError as e:
+            return False, str(e)
         if await self.is_test_mode_player_country(code):
             # test country of owner — still need some force unless test grants units
             pass
@@ -1263,6 +1283,12 @@ class Game:
             raise GameError("جنگ توسط سازمان ملل بسته شده است.")
         if await self.at_peace(attacker, defender):
             raise GameError("پیمان صلح فعال است؛ حمله ممکن نیست.")
+        try:
+            await self.legendary.assert_can_attack(attacker)
+        except LegendaryError as e:
+            raise GameError(str(e)) from e
+        if await self.legendary.is_immune(defender):
+            raise GameError("کشور هدف مصونیت دارد؛ حمله بی‌اثر است.")
         if attacker == defender:
             raise GameError("نامعتبر")
         if kind not in ("ground", "air", "sea"):
@@ -2036,6 +2062,13 @@ class Game:
             f"☢ {npt}",
             f"بازیکن: {'دارد' if c.get('owner_player_id') else 'آزاد'}",
         ]
+        try:
+            oid = c.get("owner_player_id")
+            if oid:
+                parts.append("")
+                parts.append(await self.legendary.profile_items_text(int(oid)))
+        except Exception:
+            log.exception("country_card legendary")
         return "\n".join(parts)
 
 
@@ -3317,6 +3350,13 @@ class Game:
         )
 
     async def attack_nuclear(self, attacker: str, defender: str, pid: int) -> str:
+        try:
+            await self.legendary.assert_can_nuke(attacker)
+            await self.legendary.assert_can_attack(attacker)
+        except LegendaryError as e:
+            raise GameError(str(e)) from e
+        if await self.legendary.is_immune(defender):
+            raise GameError("کشور هدف مصونیت دارد؛ حمله اتمی بی‌اثر است.")
         """Abstract nuclear strike: consumes 1 bomb, deals 25-35% max_hp damage."""
         meta = await self.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
         if meta and int(meta.get("war_enabled") or 0) != 1:
@@ -3652,6 +3692,11 @@ class Game:
         ]
         if start_count:
             lines.append(f"تعداد /start: {start_count}")
+        try:
+            lines.append("")
+            lines.append(await self.legendary.admin_player_legendary_block(target_id))
+        except Exception:
+            log.exception("admin legendary block")
         return chr(10).join(lines)
 
     async def list_owned_countries_hp(self, page: int = 0, page_size: int = 12) -> tuple[str, int]:

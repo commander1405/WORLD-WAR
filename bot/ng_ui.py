@@ -38,6 +38,7 @@ BTN_REF = "🎁 دعوت کردن"
 BTN_ALLY = "🤝 اتحادها"
 BTN_CTRL = "🏛 کنترل کشور"
 BTN_TREATY = "⚖ پیمان‌ها"
+BTN_WALLET = "💰 کیف پول"
 
 _pending: dict[int, dict] = {}
 
@@ -50,7 +51,7 @@ def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
         [BTN_WORKSHOP, BTN_SHOP],
         [BTN_INV, BTN_MKT],
         [BTN_TRADE, BTN_DIPLO],
-        [BTN_TREATY],
+        [BTN_TREATY, BTN_WALLET, BTN_WALLET],
         [BTN_ATTACK, BTN_STMT],
         [BTN_WORLD, BTN_REPORT],
         [BTN_ABOUT, BTN_GUIDE],
@@ -82,7 +83,7 @@ def cancel_row():
 MENU_TEXTS = {
     BTN_MY, BTN_ECO, BTN_SHOP, BTN_INV, BTN_MKT, BTN_TRADE, BTN_DIPLO,
     BTN_PEACE, BTN_ATTACK, BTN_STMT, BTN_WORLD, BTN_REPORT, BTN_PICK,
-    BTN_OWNER, BTN_WORKSHOP, BTN_ABOUT, BTN_GUIDE, BTN_REF, BTN_ALLY, BTN_CTRL, BTN_TREATY,
+    BTN_OWNER, BTN_WORKSHOP, BTN_ABOUT, BTN_GUIDE, BTN_REF, BTN_ALLY, BTN_CTRL, BTN_TREATY, BTN_WALLET,
     "/start", "شروع", "منو", "menu", "/admin", "/owner", "/panel",
 }
 
@@ -290,6 +291,8 @@ def register_handlers(bot, app_ctx: dict):
                     [("تغییر پول کشور", "ng:omoney")],
                     [("💰 گرفتن مالیات", "ng:otax"), ("⚖️ محکوم کردن کشور", "ng:ocondemn")],
                     [("❤️ دیدن HP ها", "ng:ohp"), ("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
+                    [("🎁 مدیریت لجندری", "ng:oleg"), ("💰 شارژ کیف پول", "ng:owallet")],
+                    [("⚙️ قیمت فروشگاه لجندری", "ng:olegprices")],
                     [("🏷 قیمت فروشگاه", "ng:oprices"), ("🏷 تخفیف فروشگاه", "ng:odiscount")],
                     [("🔴 ریست کامل جهان", "ng:oreset1")],
                 ]
@@ -765,6 +768,21 @@ def register_handlers(bot, app_ctx: dict):
                 await reply(message, await game.economy_card(code), main_kb(owner))
                 return
 
+
+            if text == BTN_WALLET:
+                try:
+                    txt = await game.legendary.wallet_text(pid)
+                except Exception:
+                    log.exception("wallet")
+                    txt = "خطا در کیف پول"
+                rows = [
+                    [("💳 واریز به کیف پول", "ng:wallet_deposit")],
+                    [("🎁 فروشگاه لجندری", "ng:legshop")],
+                    back_row(),
+                ]
+                await reply(message, txt, ik(rows))
+                return
+
             if text == BTN_SHOP:
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
@@ -783,6 +801,7 @@ def register_handlers(bot, app_ctx: dict):
                         pair = []
                 if pair:
                     rows.append(pair)
+                rows.append([("🎁 آیتم‌های لجندری", "ng:legshop")])
                 rows.append([("🛒 سبد خرید", "ng:cart"), ("✅ تسویه حساب", "ng:checkout")])
                 rows.append(back_row())
                 await reply(
@@ -873,6 +892,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("⚔️ حمله نظامی", "ng:atkmenu")],
                     [("💻 هک و امنیت", "ng:cyber")],
                     [("🛡 وضعیت پدافند من", "ng:mydef")],
+                    [("🎁 استفاده از آیتم لجندری", "ng:leguse")],
                     back_row(),
                 ]
                 await reply(message, "⚔️ عملیات نظامی و سایبری:", ik(rows))
@@ -1037,7 +1057,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc") or data.startswith("ng:ogiveall") or data.startswith("ng:odaily") or data.startswith("ng:ohp") or data.startswith("ng:osethp"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc") or data.startswith("ng:ogiveall") or data.startswith("ng:odaily") or data.startswith("ng:ohp") or data.startswith("ng:osethp") or data.startswith("ng:oleg") or data.startswith("ng:owallet") or data.startswith("ng:olegprices"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -1327,6 +1347,7 @@ def register_handlers(bot, app_ctx: dict):
                         pair = []
                 if pair:
                     rows.append(pair)
+                rows.append([("🎁 آیتم‌های لجندری", "ng:legshop")])
                 rows.append([("🛒 سبد خرید", "ng:cart"), ("✅ تسویه حساب", "ng:checkout")])
                 rows.append(back_row())
                 await out("🛒 فروشگاه — دسته را انتخاب کنید:", ik(rows))
@@ -1488,6 +1509,194 @@ def register_handlers(bot, app_ctx: dict):
             if data == "ng:noop":
                 await out("این فقط یک عنوان است.")
                 return
+
+            
+            # ---- legendary items ----
+            if data == "ng:wallet_deposit":
+                await out(
+                    "💳 شارژ کیف پول\n\n"
+                    "لطفاً برای شارژ کیف پول خود از طریق آیدی زیر به مالک پیام دهید و درخواست شارژ کنید.\n\n"
+                    "آیدی مالک: @commander04",
+                    ik([back_row()]),
+                )
+                return
+            if data == "ng:legshop":
+                defs = await game.legendary.list_defs()
+                bal = await game.legendary.ensure_wallet(pid)
+                rows = []
+                lines = ["🎁 فروشگاه آیتم‌های لجندری", f"کیف پول: {int(bal):,} تومان", ""]
+                for d in defs:
+                    rows.append([(d["name_fa"], f"ng:legitem:{d['item_code']}")])
+                rows.append(back_row())
+                await out("\n".join(lines) + "یک آیتم را انتخاب کنید:", ik(rows))
+                return
+            if data.startswith("ng:legitem:"):
+                code_i = data.split(":")[-1]
+                d = await game.legendary.get_def(code_i)
+                if not d:
+                    await out("آیتم یافت نشد")
+                    return
+                bal = await game.legendary.ensure_wallet(pid)
+                rows = [
+                    [("✅ خرید آیتم", f"ng:legbuy:{code_i}")],
+                    [("⬅️ فروشگاه لجندری", "ng:legshop")],
+                    back_row(),
+                ]
+                await out(game.legendary.card_text(d, bal), ik(rows))
+                return
+            if data.startswith("ng:legbuy:"):
+                code_i = data.split(":")[-1]
+                try:
+                    msg = await game.legendary.buy(pid, code_i)
+                    await out(msg, ik([[("🎁 فروشگاه لجندری", "ng:legshop")], back_row()]))
+                except Exception as e:
+                    from modules.ng.legendary import LegendaryError
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:leguse":
+                summary = await game.legendary.inventory_summary(pid)
+                if not summary:
+                    await out("آیتم لجندری قابل‌استفاده‌ای ندارید.", ik([back_row()]))
+                    return
+                rows = []
+                lines = ["🎁 لیست آیتم‌های لجندری شما:", ""]
+                for s in summary:
+                    lines.append(f"• {s['name_fa']} | موجودی:{s['stacks']} | استفاده:{s['uses_left']}")
+                    rows.append([(f"{s['name_fa']} ({s['uses_left']})", f"ng:legpick:{s['item_code']}")])
+                rows.append(back_row())
+                await out("\n".join(lines), ik(rows))
+                return
+            if data.startswith("ng:legpick:"):
+                code_i = data.split(":")[-1]
+                d = await game.legendary.get_def(code_i)
+                if not d:
+                    await out("آیتم نامعتبر")
+                    return
+                mode = d.get("target_mode") or "other"
+                if mode == "self":
+                    rows = [[("✅ تأیید استفاده روی کشور خودم", f"ng:leggo:{code_i}:SELF")], back_row()]
+                    await out(
+                        f"{d['name_fa']}\n{d['power_fa']}\n\nروی کشور خودتان اعمال می‌شود. تأیید؟",
+                        ik(rows),
+                    )
+                    return
+                countries = [
+                    c for c in await game.list_countries()
+                    if c.get("owner_player_id") and c["country_code"] != code
+                ]
+                rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:leggo:{code_i}:{c['country_code']}")] for c in countries[:30]]
+                rows.append(back_row())
+                await out(f"{d['name_fa']}\n{d['power_fa']}\n\nهدف را انتخاب کنید:", ik(rows))
+                return
+            if data.startswith("ng:leggo:"):
+                parts = data.split(":")
+                # ng:leggo:item:TARGET
+                if len(parts) < 4:
+                    await out("درخواست نامعتبر")
+                    return
+                code_i, tgt = parts[2], parts[3]
+                if tgt == "SELF":
+                    tgt = code
+                try:
+                    msg = await game.legendary.use_item(pid, code_i, tgt)
+                    await out(msg, ik([back_row()]))
+                except Exception as e:
+                    await out(f"❌ {e}")
+                return
+
+            # owner legendary mgmt
+            if data == "ng:oleg" or data.startswith("ng:oleg:"):
+                page = 0
+                if data.startswith("ng:oleg:"):
+                    try:
+                        page = int(data.split(":")[-1])
+                    except ValueError:
+                        page = 0
+                players, total = await game.list_players_page(page)
+                rows = []
+                for p in players:
+                    name = p.get("display_name") or p.get("username") or str(p["player_id"])
+                    rows.append([(f"{name} ({p['player_id']})", f"ng:olegp:{p['player_id']}")])
+                nav = []
+                if page > 0:
+                    nav.append(("⬅️", f"ng:oleg:{page-1}"))
+                if (page + 1) * game.PAGE_SIZE < total:
+                    nav.append(("➡️", f"ng:oleg:{page+1}"))
+                if nav:
+                    rows.append(nav)
+                rows.append(back_row())
+                await out("🎁 مدیریت آیتم لجندری — بازیکن را انتخاب کنید:", ik(rows))
+                return
+            if data.startswith("ng:olegp:"):
+                tid = int(data.split(":")[-1])
+                try:
+                    block = await game.legendary.admin_player_legendary_block(tid)
+                except Exception as e:
+                    block = str(e)
+                defs = await game.legendary.list_defs()
+                rows = [[(f"➕ {d['name_fa']}", f"ng:oleggive:{tid}:{d['item_code']}")] for d in defs[:5]]
+                rows.append([("➖ حذف سماور", f"ng:olegdel:{tid}:leg_samovar")])
+                rows.append([("💰 شارژ کیف پول", f"ng:owalletsel:{tid}")])
+                rows.append([("👤 پروفایل", f"ng:ou:{tid}")])
+                rows.append(back_row())
+                await out(f"بازیکن {tid}\n{block}", ik(rows))
+                return
+            if data.startswith("ng:oleggive:"):
+                _, _, tid, ic = data.split(":", 3)
+                try:
+                    msg = await game.legendary.admin_give_item(pid, int(tid), ic, 1)
+                    await out(msg)
+                except Exception as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:olegdel:"):
+                _, _, tid, ic = data.split(":", 3)
+                try:
+                    msg = await game.legendary.admin_remove_item(pid, int(tid), ic, 1)
+                    await out(msg)
+                except Exception as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:owallet" or data.startswith("ng:owallet:"):
+                page = 0
+                if data.startswith("ng:owallet:") and data.count(":") == 2:
+                    try:
+                        page = int(data.split(":")[-1])
+                    except ValueError:
+                        page = 0
+                players, total = await game.list_players_page(page)
+                rows = []
+                for p in players:
+                    name = p.get("display_name") or p.get("username") or str(p["player_id"])
+                    rows.append([(f"{name}", f"ng:owalletsel:{p['player_id']}")])
+                rows.append(back_row())
+                await out("💰 شارژ کیف پول — بازیکن:", ik(rows))
+                return
+            if data.startswith("ng:owalletsel:"):
+                tid = int(data.split(":")[-1])
+                bal = await game.legendary.ensure_wallet(tid)
+                _pending[pid] = {"kind": "owner_wallet_charge", "target": tid}
+                await out(
+                    f"موجودی فعلی بازیکن {tid}: {int(bal):,} تومان\nمبلغ شارژ را بنویسید:",
+                    ik([cancel_row()]),
+                )
+                return
+            if data == "ng:olegprices":
+                defs = await game.legendary.list_defs()
+                rows = [[(f"{d['name_fa']} — {int(float(d['price'])):,}", f"ng:olegprice:{d['item_code']}")] for d in defs]
+                rows.append(back_row())
+                await out("⚙️ قیمت فروشگاه لجندری:", ik(rows))
+                return
+            if data.startswith("ng:olegprice:"):
+                ic = data.split(":")[-1]
+                d = await game.legendary.get_def(ic)
+                _pending[pid] = {"kind": "owner_leg_price", "item": ic}
+                await out(
+                    f"قیمت فعلی {d['name_fa']}: {int(float(d['price'])):,} تومان\nقیمت جدید را بنویسید:",
+                    ik([cancel_row()]),
+                )
+                return
+
 
             # cyber / defense status
             if data == "ng:cyber" or data.startswith("ng:cyber:"):
@@ -2299,6 +2508,8 @@ def register_handlers(bot, app_ctx: dict):
                     [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
                     [("💵 پول همگانی", "ng:ogiveall"), ("💰 پرداخت درآمد روزانه", "ng:odaily")],
                     [("❤️ دیدن HP ها", "ng:ohp"), ("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
+                    [("🎁 مدیریت لجندری", "ng:oleg"), ("💰 شارژ کیف پول", "ng:owallet")],
+                    [("⚙️ قیمت فروشگاه لجندری", "ng:olegprices")],
                     [("⬅️ بستن", "ng:home")],
                 ]
                 await out("🛡 پنل مالک / سازمان ملل", ik(rows))
