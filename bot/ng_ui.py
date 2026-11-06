@@ -928,6 +928,7 @@ def register_handlers(bot, app_ctx: dict):
                 rows = [
                     [("💳 واریز به کیف پول", "ng:wallet_deposit")],
                     [("🎁 فروشگاه لجندری", "ng:legshop")],
+                    [("🎁 استفاده از آیتم", "ng:leguse")],
                     back_row(),
                 ]
                 await reply(message, txt, ik(rows))
@@ -1027,27 +1028,28 @@ def register_handlers(bot, app_ctx: dict):
 
 
             if text == BTN_ATTACK:
-                meta = await game.db.fetchrow("SELECT war_enabled FROM world_meta WHERE id=1")
-                if not meta or not int(meta.get("war_enabled") or 0):
-                    await reply(
-                        message,
-                        "⚠️ امکان انجام حمله وجود ندارد.\n\nدر حال حاضر وضعیت جنگ در جهان بسته است.\nبرای حمله، سازمان ملل باید جنگ را فعال کند.",
-                        main_kb(owner),
-                    )
-                    return
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
                     return
-                rows = [
-                    [("⚔️ حمله نظامی", "ng:atkmenu")],
-                    [("💻 هک و امنیت", "ng:cyber")],
-                    [("🛡 وضعیت پدافند من", "ng:mydef")],
-                    [("🎁 استفاده از آیتم لجندری", "ng:leguse")],
-                    back_row(),
-                ]
-                await reply(message, "⚔️ عملیات نظامی و سایبری:", ik(rows))
+                meta = await game.db.fetchrow("SELECT war_enabled FROM world_meta WHERE id=1")
+                war_on = bool(meta and int(meta.get("war_enabled") or 0))
+                rows = []
+                if war_on:
+                    rows.append([("⚔️ حمله نظامی", "ng:atkmenu")])
+                    rows.append([("💻 هک و امنیت", "ng:cyber")])
+                    rows.append([("🛡 وضعیت پدافند من", "ng:mydef")])
+                rows.append([("🎁 استفاده از آیتم لجندری", "ng:leguse")])
+                rows.append(back_row())
+                if war_on:
+                    head = "⚔️ عملیات نظامی و سایبری:"
+                else:
+                    head = (
+                        "⚠️ وضعیت جنگ در جهان بسته است." + "\n"
+                        + "حمله نظامی / هک / پدافند فعلاً غیرفعال است." + "\n\n"
+                        + "می‌توانید از آیتم‌های لجندری استفاده کنید:"
+                    )
+                await reply(message, head, ik(rows))
                 return
-
             if text == BTN_STMT:
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
@@ -1187,8 +1189,21 @@ def register_handlers(bot, app_ctx: dict):
             msg = getattr(cq, "message", None)
 
             async def out(text, kb=None):
-                if msg is not None:
-                    await msg.reply(str(text)[:3500], components=kb or main_kb(owner))
+                body = str(text)[:3500]
+                comp = kb if kb is not None else main_kb(owner)
+                try:
+                    if msg is not None:
+                        await msg.reply(body, components=comp)
+                        return
+                except Exception:
+                    log.exception("out.reply failed")
+                try:
+                    chat = getattr(msg, "chat", None) if msg is not None else None
+                    chat_id = getattr(chat, "id", None) or getattr(chat, "chat_id", None)
+                    if chat_id is not None:
+                        await bot.send_message(chat_id, body, components=comp)
+                except Exception:
+                    log.exception("out.send_message failed")
 
 
             if data == "ng:guide" or data.startswith("ng:guide:"):
@@ -1740,17 +1755,42 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:leggo:"):
                 parts = data.split(":")
-                # ng:leggo:item:TARGET
                 if len(parts) < 4:
-                    await out("درخواست نامعتبر")
+                    await out("❌ درخواست نامعتبر است. دوباره از منوی آیتم لجندری شروع کنید.")
                     return
-                code_i, tgt = parts[2], parts[3]
+                code_i = parts[2]
+                tgt = parts[3]
+                if not code:
+                    await out("❌ ابتدا باید کشور داشته باشید.")
+                    return
                 if tgt == "SELF":
                     tgt = code
+                if not code_i:
+                    await out("❌ آیتم نامعتبر")
+                    return
                 try:
-                    msg = await game.legendary.use_item(pid, code_i, tgt)
-                    await out(msg, ik([back_row()]))
+                    result = await game.legendary.use_item(pid, code_i, tgt)
+                    try:
+                        summary = await game.legendary.inventory_summary(pid)
+                        left_line = ""
+                        for s in summary:
+                            if s["item_code"] == code_i:
+                                left_line = chr(10) + f"📦 باقی‌مانده این آیتم: {s['uses_left']} استفاده"
+                                break
+                        if not left_line:
+                            left_line = chr(10) + "📦 این آیتم دیگر استفاده باقی‌مانده ندارد (تمام شد)."
+                        result = result + left_line
+                    except Exception:
+                        pass
+                    await out(
+                        result,
+                        ik([
+                            [("🎁 استفاده دوباره", "ng:leguse")],
+                            back_row(),
+                        ]),
+                    )
                 except Exception as e:
+                    log.exception("leggo use_item %s -> %s", code_i, tgt)
                     await out(f"❌ {e}")
                 return
 

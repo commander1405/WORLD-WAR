@@ -502,24 +502,26 @@ class LegendaryService:
         self, pid: int, item_code: str, target_country: Optional[str]
     ) -> str:
         d = await self.get_def(item_code)
-        if not d:
-            raise LegendaryError("آیتم نامعتبر")
+        if not d or not int(d.get("active") or 0):
+            raise LegendaryError("آیتم نامعتبر یا غیرفعال است.")
         mode = d.get("target_mode") or "other"
         own = await self.g.player_country(pid)
+        if not own:
+            raise LegendaryError("ابتدا باید یک کشور انتخاب کرده باشید.")
+
         if mode == "self":
-            if not own:
-                raise LegendaryError("ابتدا کشور داشته باشید.")
             target_country = own
         else:
-            if not target_country:
+            if not target_country or target_country in ("SELF", "None", "null"):
                 raise LegendaryError("کشور هدف لازم است.")
+            target_country = str(target_country).upper()
             if target_country == own:
                 raise LegendaryError("نمی‌توانید این آیتم را روی کشور خودتان استفاده کنید.")
             t = await self.db.fetchrow(
                 "SELECT * FROM ng_countries WHERE country_code=$1", (target_country,)
             )
             if not t or int(t.get("is_destroyed") or 0):
-                raise LegendaryError("هدف معتبر نیست.")
+                raise LegendaryError("هدف معتبر نیست یا نابود شده است.")
             if not t.get("owner_player_id"):
                 raise LegendaryError("هدف بدون بازیکن است.")
 
@@ -534,8 +536,9 @@ class LegendaryService:
                 (int(pid), item_code),
             )
             if not stack:
-                raise LegendaryError("موجودی قابل‌استفاده ندارید.")
-            uses = int(stack["uses_left"]) - 1
+                raise LegendaryError("موجودی قابل‌استفاده ندارید. از فروشگاه دوباره بخرید.")
+            uses_before = int(stack["uses_left"])
+            uses = uses_before - 1
             if uses <= 0:
                 await tx.execute(
                     "DELETE FROM ng_player_legendary WHERE id=$1", (stack["id"],)
@@ -559,6 +562,8 @@ class LegendaryService:
                 ends = (now + timedelta(seconds=int(d["duration_sec"] or 900))).isoformat()
             elif et == "nuke_ban":
                 ends = (now + timedelta(seconds=int(d["duration_sec"] or 900))).isoformat()
+            else:
+                raise LegendaryError(f"نوع اثر پشتیبانی نمی‌شود: {et}")
 
             eid = await tx.fetchrow(
                 "SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_legendary_effects"
@@ -590,11 +595,15 @@ class LegendaryService:
             )
 
         label = await self.g.country_label(target_country)
+        duration_txt = ""
+        if ends:
+            duration_txt = f"\n⏱ تا: {ends}"
         return (
             f"✅ {d['name_fa']} استفاده شد.\n"
             f"هدف: {label}\n"
             f"اثر: {d['power_fa']}\n"
-            f"استفاده باقی‌مانده از این نسخه: {max(0, uses)}"
+            f"مصرف: ۱ از {uses_before} → باقی‌مانده این نسخه: {max(0, uses)}"
+            f"{duration_txt}"
         )
 
     async def profile_items_text(self, pid: int) -> str:
