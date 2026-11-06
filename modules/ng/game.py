@@ -447,13 +447,32 @@ class Game:
         return 1.0
 
     async def cart_add(self, pid: int, item: str, qty: float) -> str:
-        meta = self._cat[item]
-        qty = max(1, min(float(meta["max_per_order"]), float(qty)))
+        meta = self._cat.get(item) or {}
+        if not meta:
+            raise GameError("کالا یافت نشد")
+        # max_per_order = max units in ONE button press
+        # cart may stack higher via repeated adds
+        max_one = float(meta.get("max_per_order") or 10)
+        if max_one < 1:
+            max_one = 1
+        cart_cap = max(max_one * 10, 50)
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            qty = 1.0
+        qty = max(1.0, min(max_one, qty))
         row = await self.db.fetchrow(
             "SELECT quantity FROM ng_cart WHERE player_id=$1 AND item_code=$2", (pid, item)
         )
+        prev = float(row["quantity"]) if row else 0.0
+        nq = min(cart_cap, prev + qty)
+        added = nq - prev
+        if added <= 0:
+            return (
+                f"⚠ سقف سبد برای «{meta.get('name_fa')}» پر است "
+                f"(حداکثر {int(cart_cap)} در سبد)."
+            )
         if row:
-            nq = min(float(meta["max_per_order"]), float(row["quantity"]) + qty)
             await self.db.execute(
                 "UPDATE ng_cart SET quantity=$1 WHERE player_id=$2 AND item_code=$3",
                 (nq, pid, item),
@@ -461,9 +480,17 @@ class Game:
         else:
             await self.db.execute(
                 "INSERT INTO ng_cart (player_id, item_code, quantity) VALUES ($1,$2,$3)",
-                (pid, item, qty),
+                (pid, item, nq),
             )
-        return f"✅ {meta['name_fa']} × {int(qty)} به سبد اضافه شد."
+        note = ""
+        if added + 1e-9 < qty:
+            note = chr(10) + f"(درخواست {int(qty)} بود؛ به سقف سبد محدود شد)"
+        return (
+            f"✅ {meta.get('name_fa')} × {int(added)} به سبد اضافه شد."
+            + chr(10)
+            + f"جمع این کالا در سبد: {int(nq)}"
+            + note
+        )
 
     async def cart_view(self, pid: int, country_code: str) -> tuple[str, float, list]:
         c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (country_code,))
@@ -2587,6 +2614,37 @@ class Game:
         )
         return bool(inv and float(inv["quantity"]) >= min_q)
 
+    async def _has_any_refinery(self, tx, code: str) -> bool:
+        """Accept any shop refinery variant + legacy codes."""
+        codes = (
+            "b_refinery",
+            "b_refinery_s",
+            "b_refinery_m",
+            "b_refinery_l",
+            "b_oil_field",
+        )
+        for ic in codes:
+            inv = await tx.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                (code, ic),
+            )
+            if inv and float(inv.get("quantity") or 0) >= 1:
+                return True
+            b = await tx.fetchrow(
+                "SELECT id FROM ng_buildings WHERE country_code=$1 AND building_code=$2 AND COALESCE(active,1)=1",
+                (code, ic),
+            )
+            if b:
+                return True
+        invs = await tx.fetch(
+            "SELECT item_code, quantity FROM ng_inventory WHERE country_code=$1 AND quantity>0",
+            (code,),
+        )
+        for r in invs:
+            if "refinery" in str(r["item_code"]).lower() and float(r.get("quantity") or 0) >= 1:
+                return True
+        return False
+
     async def start_uranium_job(self, code: str, pid: int) -> str:
         """Peaceful uranium feedstock production — requires refinery."""
         await self.complete_due_jobs(code)
@@ -2598,18 +2656,11 @@ class Game:
             )
             if running:
                 raise GameError("یک عملیات تولید اورانیوم در حال اجرا است.")
-            if not await self._has_item(tx, code, "b_refinery", 1):
-                # also accept building table
-                b = await tx.fetchrow(
-                    "SELECT id FROM ng_buildings WHERE country_code=$1 AND building_code='b_refinery' AND active=1",
-                    (code,),
+            if not await self._has_any_refinery(tx, code):
+                raise GameError(
+                    "برای تولید اورانیوم به پالایشگاه نیاز دارید "
+                    "(کوچک / متوسط / بزرگ از فروشگاه زیرساخت)."
                 )
-                inv = await tx.fetchrow(
-                    "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='b_refinery'",
-                    (code,),
-                )
-                if not b and not (inv and float(inv["quantity"]) >= 1):
-                    raise GameError("برای تولید اورانیوم به پالایشگاه نیاز دارید.")
             ws = await tx.fetchrow("SELECT * FROM ng_workshop WHERE country_code=$1", (code,))
             if not ws:
                 await tx.execute(
@@ -2979,7 +3030,7 @@ class Game:
             ("s_patrol", 50),
             ("d_sam", 50),
             ("sp_scientist", 20),
-            ("b_refinery", 5),
+            ("b_refinery_s", 1),
         ):
             inv_r = await self.db.fetchrow(
                 "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
