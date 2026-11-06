@@ -3376,36 +3376,227 @@ class Game:
         start = page * self.PAGE_SIZE
         return rows[start:start + self.PAGE_SIZE], total
 
+
+    @staticmethod
+    def format_tehran_time(ts) -> str:
+        """Human-readable Tehran time relative to now."""
+        if not ts or ts in ("—", "-", "None"):
+            return "اطلاعاتی ثبت نشده"
+        try:
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local = dt.astimezone(TEHRAN)
+            now = datetime.now(TEHRAN)
+            delta = now.date() - local.date()
+            tstr = local.strftime("%H:%M")
+            if delta.days == 0:
+                return f"امروز، ساعت {tstr}"
+            if delta.days == 1:
+                return f"دیروز، ساعت {tstr}"
+            if delta.days < 7:
+                return f"{delta.days} روز پیش، ساعت {tstr}"
+            if delta.days < 30:
+                weeks = max(1, delta.days // 7)
+                return f"{weeks} هفته پیش ({local.strftime('%Y/%m/%d')} ساعت {tstr})"
+            return f"{local.strftime('%Y/%m/%d')} ساعت {tstr}"
+        except Exception:
+            return "اطلاعاتی ثبت نشده"
+
+    async def npt_status_text(self, code: str | None, player_id: int | None = None) -> str:
+        if not code:
+            return "غیرعضو NPT"
+        c = await self.db.fetchrow(
+            "SELECT npt_member FROM ng_countries WHERE country_code=$1", (code,)
+        )
+        member = int((c or {}).get("npt_member") or 0) == 1
+        pending = await self.db.fetchrow(
+            """
+            SELECT request_type, status, created_at FROM ng_npt_requests
+            WHERE country_code=$1 AND status='pending'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (code,),
+        )
+        if pending:
+            rt = pending.get("request_type") or "join"
+            if rt in ("leave", "exit", "withdraw"):
+                return "درخواست خروج از NPT — در انتظار تأیید"
+            return "درخواست عضویت NPT — در انتظار تأیید"
+        if member:
+            return "عضو فعال NPT"
+        # latest rejected
+        rejected = await self.db.fetchrow(
+            """
+            SELECT request_type, status, created_at FROM ng_npt_requests
+            WHERE country_code=$1 AND status IN ('rejected','denied')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (code,),
+        )
+        if rejected:
+            return "غیرعضو NPT (آخرین درخواست رد شده)"
+        return "غیرعضو NPT"
+
     async def player_admin_card(self, target_id: int) -> str:
+        target_id = int(target_id)
         p = await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (target_id,))
         if not p:
             raise GameError("بازیکن یافت نشد")
-        code = p.get("country_code")
+        # live ownership resolution
+        code = await self.resolve_country_for_player(target_id)
+        if not code:
+            code = p.get("country_code")
         c = None
         if code:
             c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
-        ban = "مسدود" if int(p.get("is_banned") or 0) else "آزاد"
-        npt = "—"
+            # verify ownership match when possible
+            if c and c.get("owner_player_id") and int(c["owner_player_id"]) != target_id and code != UN_CODE:
+                # prefer actual owned country
+                owned = await self.db.fetchrow(
+                    "SELECT * FROM ng_countries WHERE owner_player_id=$1 AND country_code<>$2",
+                    (target_id, UN_CODE),
+                )
+                if owned:
+                    c = owned
+                    code = owned["country_code"]
+
+        banned = int(p.get("is_banned") or 0) == 1
+        ban = "مسدود 🚫" if banned else "آزاد ✅"
+        ban_reason = (p.get("ban_reason") or "").strip() or "—"
+        if banned and p.get("banned_until"):
+            ban += f" (تا {self.format_tehran_time(p.get('banned_until'))})"
+
+        country_name = "بدون کشور"
         treas = 0
+        hp_line = "❤️ HP کشور: —"
         if c:
-            npt = "عضو NPT" if int(c.get("npt_member") or 0) else "غیرعضو NPT"
+            country_name = f"{c.get('flag') or ''} {c.get('name_fa') or code}".strip()
             treas = float(c.get("treasury") or 0)
+            hp = float(c.get("hp") or 0)
+            max_hp = float(c.get("max_hp") or 1000) or 1000
+            dbl = " ×۲" if int(c.get("double_hp") or 0) else ""
+            hp_line = f"❤️ HP کشور: {int(hp)} / {int(max_hp)}{dbl}"
+
+        npt = await self.npt_status_text(code, target_id)
+
+        # military equipment count (combat categories)
+        eq_count = 0
+        if code:
+            inv = await self.db.fetch(
+                "SELECT item_code, quantity FROM ng_inventory WHERE country_code=$1 AND quantity>0",
+                (code,),
+            )
+            combat_cats = {"ground", "air", "sea", "missile", "defense", "specialist"}
+            for r in inv:
+                meta = self._cat.get(r["item_code"]) or {}
+                if meta.get("category") in combat_cats:
+                    eq_count += int(float(r["quantity"]))
+
+        # alliances
+        ally_n = 0
+        ally_names = []
+        try:
+            mems = await self.db.fetch(
+                "SELECT alliance_id FROM ng_alliance_members WHERE player_id=$1 OR country_code=$2",
+                (target_id, code or ""),
+            )
+            ids = {int(m["alliance_id"]) for m in mems}
+            ally_n = len(ids)
+            for aid in list(ids)[:3]:
+                a = await self.db.fetchrow(
+                    "SELECT name, status FROM ng_alliances WHERE id=$1", (aid,)
+                )
+                if a:
+                    ally_names.append(f"{a['name']} ({a.get('status') or '—'})")
+        except Exception:
+            pass
+        ally_line = f"{ally_n}"
+        if ally_names:
+            ally_line += " — " + "، ".join(ally_names)
+
+        # active wars approximation: recent attacks involving country in last 24h
+        wars = 0
+        if code:
+            try:
+                rows = await self.db.fetch(
+                    "SELECT id, summary, created_at FROM ng_activity WHERE kind='attack' ORDER BY id DESC LIMIT 50"
+                )
+                now = datetime.now(timezone.utc)
+                for r in rows:
+                    sm = r.get("summary") or ""
+                    if code not in sm and (c and (c.get("name_fa") or "") not in sm):
+                        continue
+                    try:
+                        dt = datetime.fromisoformat(str(r.get("created_at")).replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        if (now - dt).total_seconds() <= 86400:
+                            wars += 1
+                    except Exception:
+                        pass
+            except Exception:
+                wars = 0
+
+        last_seen = self.format_tehran_time(p.get("last_seen_at"))
         act = await self.db.fetchrow(
-            "SELECT last_start_at FROM ng_player_activity WHERE player_id=$1", (target_id,)
+            "SELECT last_start_at, start_count FROM ng_player_activity WHERE player_id=$1",
+            (target_id,),
         )
-        last_start = (act or {}).get("last_start_at") or "—"
-        return (
-            f"👤 مدیریت کاربر\n"
-            f"شناسه: {target_id}\n"
-            f"نام کاربری: @{p.get('username') or '—'}\n"
-            f"نام نمایشی: {p.get('display_name') or '—'}\n"
-            f"کشور: {code or 'نامشخص'}\n"
-            f"وضعیت: {ban}\n"
-            f"دلیل بن: {p.get('ban_reason') or '—'}\n"
-            f"پول: {int(treas):,}\n"
-            f"NPT: {npt}\n"
-            f"آخرین /start: {last_start}"
+        last_start = self.format_tehran_time((act or {}).get("last_start_at"))
+        start_count = int((act or {}).get("start_count") or 0)
+
+        lines = [
+            "👤 مدیریت کاربر",
+            f"شناسه: `{target_id}`",
+            f"نام کاربری: @{p.get('username') or '—'}",
+            f"نام نمایشی: {p.get('display_name') or '—'}",
+            f"کشور: {country_name}",
+            f"وضعیت حساب: {ban}",
+            f"دلیل مسدودیت: {ban_reason}",
+            f"💰 موجودی: {int(treas):,}",
+            f"NPT: {npt}",
+            f"🪖 تجهیزات نظامی: {eq_count}",
+            f"⚔️ درگیری‌های ۲۴س اخیر: {wars}",
+            f"🤝 اتحادها: {ally_line}",
+            hp_line,
+            f"آخرین فعالیت: {last_seen}",
+            f"آخرین /start: {last_start}",
+        ]
+        if start_count:
+            lines.append(f"تعداد /start: {start_count}")
+        return chr(10).join(lines)
+
+    async def list_owned_countries_hp(self, page: int = 0, page_size: int = 12) -> tuple[str, int]:
+        """Owner view: HP of all player-owned countries, sorted high→low."""
+        rows = await self.db.fetch(
+            """
+            SELECT country_code, name_fa, flag, hp, max_hp, double_hp, owner_player_id
+            FROM ng_countries
+            WHERE owner_player_id IS NOT NULL AND country_code<>$1 AND COALESCE(is_destroyed,0)=0
+            ORDER BY hp DESC, name_fa ASC
+            """,
+            (UN_CODE,),
         )
+        total = len(rows)
+        page = max(0, int(page))
+        start = page * page_size
+        chunk = rows[start:start + page_size]
+        lines = ["❤️ وضعیت HP کشورها", f"تعداد: {total}", ""]
+        if not chunk:
+            lines.append("کشوری با بازیکن یافت نشد.")
+        for r in chunk:
+            flag = r.get("flag") or ""
+            name = r.get("name_fa") or r["country_code"]
+            hp = int(float(r.get("hp") or 0))
+            mx = int(float(r.get("max_hp") or 1000) or 1000)
+            dbl = " ×۲" if int(r.get("double_hp") or 0) else ""
+            lines.append(f"{flag} {name} — HP: {hp} / {mx}{dbl}")
+        pages = max(1, (total + page_size - 1) // page_size)
+        lines.append("")
+        lines.append(f"صفحه {page + 1} از {pages}")
+        return chr(10).join(lines), total
+
 
     async def ledger_write(self, kind: str, amount: float, actor: int, from_c=None, to_c=None, reason: str = "") -> None:
         nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_finance_ledger")

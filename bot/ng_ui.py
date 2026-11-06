@@ -289,7 +289,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("بن کاربر", "ng:oban"), ("آنبن کاربر", "ng:ounban")],
                     [("تغییر پول کشور", "ng:omoney")],
                     [("💰 گرفتن مالیات", "ng:otax"), ("⚖️ محکوم کردن کشور", "ng:ocondemn")],
-                    [("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
+                    [("❤️ دیدن HP ها", "ng:ohp"), ("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
                     [("🏷 قیمت فروشگاه", "ng:oprices"), ("🏷 تخفیف فروشگاه", "ng:odiscount")],
                     [("🔴 ریست کامل جهان", "ng:oreset1")],
                 ]
@@ -1020,7 +1020,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc") or data.startswith("ng:ogiveall") or data.startswith("ng:odaily"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc") or data.startswith("ng:ogiveall") or data.startswith("ng:odaily") or data.startswith("ng:ohp"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -2178,6 +2178,35 @@ def register_handlers(bot, app_ctx: dict):
                     await out("❌ خطا در خاموش کردن جان ۲ برابر")
                 return
 
+            if data == "ng:ohp" or data.startswith("ng:ohp:"):
+                page = 0
+                if data.startswith("ng:ohp:"):
+                    try:
+                        page = int(data.split(":")[-1])
+                    except ValueError:
+                        page = 0
+                text_hp, total = await game.list_owned_countries_hp(page=page, page_size=12)
+                nav = []
+                pages = max(1, (total + 11) // 12)
+                if page > 0:
+                    nav.append(("⬅️ قبلی", f"ng:ohp:{page-1}"))
+                if page + 1 < pages:
+                    nav.append(("بعدی ➡️", f"ng:ohp:{page+1}"))
+                rows = []
+                if nav:
+                    rows.append(nav)
+                rows.append([("🛡 بازگشت پنل مالک", "ng:opanel")])
+                await out(text_hp, ik(rows))
+                return
+            if data == "ng:opanel":
+                rows = [
+                    [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
+                    [("💵 پول همگانی", "ng:ogiveall"), ("💰 پرداخت درآمد روزانه", "ng:odaily")],
+                    [("❤️ دیدن HP ها", "ng:ohp"), ("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
+                    [("⬅️ بستن", "ng:home")],
+                ]
+                await out("🛡 پنل مالک / سازمان ملل", ik(rows))
+                return
             if data.startswith("ng:ou:"):
                 tid = int(data.split(":")[-1])
                 try:
