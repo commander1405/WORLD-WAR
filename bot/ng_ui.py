@@ -60,7 +60,18 @@ def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
         [BTN_ABOUT, BTN_GUIDE],
         [BTN_PICK],
     ]
-    for i, row in enumerate(rows, 1):
+    # dedupe texts while preserving order (fixes accidental double wallet)
+    seen = set()
+    clean = []
+    for row in rows:
+        nr = []
+        for t in row:
+            if t and t not in seen:
+                seen.add(t)
+                nr.append(t)
+        if nr:
+            clean.append(nr)
+    for i, row in enumerate(clean, 1):
         for t in row:
             kb.add(MenuKeyboardButton(t), row=i)
     return kb
@@ -130,31 +141,15 @@ async def reply(msg, text, kb=None):
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-async def send_photo_with_caption(target_msg, bot, photo_path, caption: str, kb=None):
-    """Send one photo + caption + buttons; fall back to text if image missing."""
-    caption = str(caption or "")[:1024]
-    try:
-        if photo_path is not None:
-            p = Path(photo_path)
-            if p.exists() and p.is_file():
-                photo = InputFile(str(p), file_name=p.name)
-                if target_msg is not None and hasattr(target_msg, "reply_photo"):
-                    await target_msg.reply_photo(photo, caption=caption, components=kb)
-                    return True
-                chat = getattr(target_msg, "chat", None) if target_msg is not None else None
-                chat_id = getattr(chat, "id", None) or getattr(chat, "chat_id", None)
-                if chat_id is not None and bot is not None:
-                    await bot.send_photo(chat_id, photo, caption=caption, components=kb)
-                    return True
-    except Exception:
-        log.exception("send_photo_with_caption path=%s", photo_path)
-    try:
-        if target_msg is not None:
-            await target_msg.reply(str(caption)[:3500], components=kb)
-            return False
-    except Exception:
-        log.exception("send_photo fallback text")
-    return False
+def _extract_chat_id(target_msg):
+    if target_msg is None:
+        return None
+    chat = getattr(target_msg, "chat", None)
+    if chat is not None:
+        cid = getattr(chat, "id", None) or getattr(chat, "chat_id", None)
+        if cid is not None:
+            return cid
+    return getattr(target_msg, "chat_id", None)
 
 
 def legendary_image_path(image_path):
@@ -166,28 +161,74 @@ def legendary_image_path(image_path):
     return p
 
 
+def load_photo_input(photo_path):
+    """Bale treats str InputFile as file_id — local files must be bytes."""
+    if photo_path is None:
+        return None
+    p = Path(photo_path)
+    if not p.exists() or not p.is_file():
+        log.warning("legendary image missing: %s", p)
+        return None
+    data = p.read_bytes()
+    if not data:
+        log.warning("legendary image empty: %s", p)
+        return None
+    return InputFile(data, file_name=p.name)
+
+
+async def send_photo_with_caption(target_msg, bot, photo_path, caption: str, kb=None):
+    caption = str(caption or "")[:1024]
+    photo = load_photo_input(photo_path)
+    if photo is not None:
+        try:
+            if target_msg is not None and hasattr(target_msg, "reply_photo"):
+                await target_msg.reply_photo(photo, caption=caption, components=kb)
+                return True
+        except Exception:
+            log.exception("reply_photo failed path=%s", photo_path)
+        try:
+            chat_id = _extract_chat_id(target_msg)
+            if chat_id is not None and bot is not None:
+                photo2 = load_photo_input(photo_path)
+                if photo2 is not None:
+                    await bot.send_photo(chat_id, photo2, caption=caption, components=kb)
+                    return True
+        except Exception:
+            log.exception("bot.send_photo failed path=%s", photo_path)
+    try:
+        if target_msg is not None:
+            note = "\n\n(عکس آیتم روی سرور پیدا نشد)" if photo is None else ""
+            await target_msg.reply((caption + note)[:3500], components=kb)
+            return False
+    except Exception:
+        log.exception("photo fallback text failed")
+    return False
+
+
 async def send_legendary_shop(target_msg, bot, game, pid: int, out_text=None):
-    """Intro + separate photo message per legendary item with working Buy button."""
     defs = await game.legendary.list_defs()
     bal = await game.legendary.ensure_wallet(pid)
     intro = (
         "🎁 فروشگاه آیتم‌های لجندری" + "\n"
         + f"کیف پول شما: {int(bal):,} تومان" + "\n\n"
-        + "هر آیتم در یک پیام جدا (عکس + توضیحات + دکمه خرید) ارسال می‌شود."
+        + "هر آیتم جداگانه با عکس و دکمه خرید ارسال می‌شود."
     )
     if out_text is not None:
-        await out_text(intro, ik([back_row()]))
+        await out_text(intro)
     elif target_msg is not None:
-        await target_msg.reply(intro, components=ik([back_row()]))
+        await target_msg.reply(intro)
     for d in defs:
         card = game.legendary.card_text(d, bal)
         kb = ik([
             [("✅ خرید این آیتم", "ng:legbuy:" + str(d["item_code"]))],
-            [("🔄 بروزرسانی فروشگاه", "ng:legshop")],
-            back_row(),
         ])
         img = legendary_image_path(d.get("image_path"))
-        await send_photo_with_caption(target_msg, bot, img, card, kb)
+        ok = await send_photo_with_caption(target_msg, bot, img, card, kb)
+        log.info(
+            "legendary card item=%s ok=%s path=%s exists=%s",
+            d.get("item_code"), ok, img,
+            bool(img and Path(img).exists()) if img else False,
+        )
 
 
 def register_handlers(bot, app_ctx: dict):
@@ -1598,8 +1639,6 @@ def register_handlers(bot, app_ctx: dict):
                 bal = await game.legendary.ensure_wallet(pid)
                 kb = ik([
                     [("✅ خرید این آیتم", f"ng:legbuy:{code_i}")],
-                    [("🔄 فروشگاه لجندری", "ng:legshop")],
-                    back_row(),
                 ])
                 await send_photo_with_caption(
                     msg, bot, legendary_image_path(d.get("image_path")),
