@@ -893,6 +893,41 @@ def register_handlers(bot, app_ctx: dict):
                         log.exception("owner_leg_uses")
                         await reply(message, "❌ عدد استفاده نامعتبر است. مثال: 20", ik([cancel_row()]))
                     return
+                if kind == "owner_player_search":
+                    try:
+                        hits = await game.search_players(text, limit=30)
+                        _pending.pop(pid, None)
+                        if not hits:
+                            await reply(
+                                message,
+                                "❌ بازیکنی پیدا نشد." + "\n"
+                                + "دوباره با @username یا شناسه جستجو کنید.",
+                                ik([
+                                    [("🔍 جستجوی دوباره", "ng:o:psearch")],
+                                    [("⬅️ لیست کاربران", "ng:o:players:0")],
+                                    back_row(),
+                                ]),
+                            )
+                            return
+                        rows = []
+                        lines_out = [f"🔍 نتیجه جستجو برای: {text}", f"تعداد: {len(hits)}", ""]
+                        for p in hits:
+                            cname = p.get("country_label") or "بدون کشور"
+                            un = p.get("display_name") or p.get("username") or "بدون‌نام"
+                            uname = p.get("username")
+                            at = f"@{uname}" if uname else ""
+                            pid_s = p["player_id"]
+                            lines_out.append(f"• {un} {at} | {cname} | {pid_s}")
+                            label = f"{un} | {cname} | {pid_s}"
+                            rows.append([(label[:48], f"ng:ou:{pid_s}")])
+                        rows.append([("🔍 جستجوی دوباره", "ng:o:psearch")])
+                        rows.append([("⬅️ لیست کاربران", "ng:o:players:0")])
+                        rows.append(back_row())
+                        await reply(message, "\n".join(lines_out), ik(rows))
+                    except Exception as e:
+                        log.exception("owner_player_search")
+                        await reply(message, f"❌ خطا در جستجو: {e}", ik([cancel_row()]))
+                    return
                 if kind == "owner_set_hp":
                     try:
                         raw = text.strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
@@ -2416,6 +2451,7 @@ def register_handlers(bot, app_ctx: dict):
                         nav.append(("بعدی ➡️", f"ng:o:players:{page+1}"))
                     if nav:
                         rows.append(nav)
+                    rows.append([("🔍 جستجو با @", "ng:o:psearch")])
                     rows.append(back_row())
                     await out("\n".join(lines), ik(rows))
                 except Exception as e:

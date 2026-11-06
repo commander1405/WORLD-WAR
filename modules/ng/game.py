@@ -3565,6 +3565,67 @@ class Game:
         start = page * self.PAGE_SIZE
         return enriched[start:start + self.PAGE_SIZE], total
 
+    async def search_players(self, query: str, limit: int = 30) -> list[dict]:
+        """Owner search by @username, display name, player id, or country."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        if q.startswith("@"):
+            q = q[1:].strip()
+        if not q:
+            return []
+        # normalize persian digits
+        trans = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+        q_norm = q.translate(trans).strip()
+        q_lower = q_norm.lower()
+
+        rows = await self.db.fetch("SELECT * FROM ng_players ORDER BY player_id")
+        hits: list[dict] = []
+        for raw in rows:
+            p = dict(raw)
+            pid = int(p["player_id"])
+            try:
+                live = await self.resolve_country_for_player(
+                    pid, include_un_for_owner=(self.owner_id and pid == int(self.owner_id))
+                )
+            except Exception:
+                live = p.get("country_code")
+            p["country_code"] = live
+            if live:
+                try:
+                    p["country_label"] = await self.country_label(live)
+                except Exception:
+                    p["country_label"] = str(live)
+                try:
+                    p["country_name"] = await self.country_name_only(live)
+                except Exception:
+                    p["country_name"] = str(live)
+            else:
+                p["country_label"] = "بدون کشور"
+                p["country_name"] = ""
+
+            un = str(p.get("username") or "").lstrip("@").lower()
+            dn = str(p.get("display_name") or "").lower()
+            pid_s = str(pid)
+            cc = str(p.get("country_code") or "").lower()
+            cn = str(p.get("country_name") or "").lower()
+            cl = str(p.get("country_label") or "").lower()
+
+            matched = False
+            if q_lower in un or un == q_lower:
+                matched = True
+            elif q_lower in dn:
+                matched = True
+            elif q_norm.isdigit() and (pid_s == q_norm or pid_s.endswith(q_norm)):
+                matched = True
+            elif q_lower in cc or q_lower in cn or q_lower in cl:
+                matched = True
+            if matched:
+                hits.append(p)
+            if len(hits) >= max(1, min(50, int(limit))):
+                break
+        return hits
+
 
     @staticmethod
     def format_tehran_time(ts) -> str:
