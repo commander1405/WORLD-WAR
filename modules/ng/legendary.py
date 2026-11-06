@@ -293,16 +293,23 @@ class LegendaryService:
 
     def card_text(self, d: dict, wallet: float) -> str:
         dur = int(d.get("duration_sec") or 0)
-        dur_line = f"مدت اثر: {dur // 60} دقیقه" if dur else "مدت اثر: یک نوبت درآمدی"
-        return (
-            f"{d['name_fa']}\n"
-            f"{d['description_fa']}\n\n"
-            f"قدرت:\n{d['power_fa']}\n\n"
-            f"{dur_line}\n"
-            f"تعداد استفاده پس از خرید: {int(d.get('uses_per_unit') or USES_PER_UNIT)} بار\n"
-            f"قیمت: {int(float(d['price'])):,} تومان\n"
-            f"کیف پول شما: {int(wallet):,} تومان"
-        )
+        if dur > 0:
+            dur_line = f"مدت اثر: {dur // 60} دقیقه"
+        else:
+            dur_line = "مدت اثر: یک نوبت درآمدی"
+        lines = [
+            str(d.get("name_fa") or ""),
+            str(d.get("description_fa") or ""),
+            "",
+            "قدرت:",
+            str(d.get("power_fa") or ""),
+            "",
+            dur_line,
+            f"تعداد استفاده پس از خرید: {int(d.get('uses_per_unit') or USES_PER_UNIT)} بار",
+            f"قیمت: {int(float(d['price'])):,} تومان",
+            f"کیف پول شما: {int(wallet):,} تومان",
+        ]
+        return "\n".join(lines)
 
     async def buy(self, pid: int, item_code: str) -> str:
         d = await self.get_def(item_code)

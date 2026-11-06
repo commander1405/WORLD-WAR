@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import logging
 
+from pathlib import Path
+
 from bale import (
     MenuKeyboardMarkup,
     MenuKeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    InputFile,
 )
 from modules.ng.catalog import CATALOG, CAT_FA, items_in_category
 from modules.ng.guide import guide_menu_rows, guide_page, GUIDE_SECTIONS
@@ -51,7 +54,7 @@ def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
         [BTN_WORKSHOP, BTN_SHOP],
         [BTN_INV, BTN_MKT],
         [BTN_TRADE, BTN_DIPLO],
-        [BTN_TREATY, BTN_WALLET, BTN_WALLET],
+        [BTN_TREATY, BTN_WALLET],
         [BTN_ATTACK, BTN_STMT],
         [BTN_WORLD, BTN_REPORT],
         [BTN_ABOUT, BTN_GUIDE],
@@ -122,6 +125,69 @@ def _names(m):
 
 async def reply(msg, text, kb=None):
     await msg.reply(str(text)[:3500], components=kb)
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+async def send_photo_with_caption(target_msg, bot, photo_path, caption: str, kb=None):
+    """Send one photo + caption + buttons; fall back to text if image missing."""
+    caption = str(caption or "")[:1024]
+    try:
+        if photo_path is not None:
+            p = Path(photo_path)
+            if p.exists() and p.is_file():
+                photo = InputFile(str(p), file_name=p.name)
+                if target_msg is not None and hasattr(target_msg, "reply_photo"):
+                    await target_msg.reply_photo(photo, caption=caption, components=kb)
+                    return True
+                chat = getattr(target_msg, "chat", None) if target_msg is not None else None
+                chat_id = getattr(chat, "id", None) or getattr(chat, "chat_id", None)
+                if chat_id is not None and bot is not None:
+                    await bot.send_photo(chat_id, photo, caption=caption, components=kb)
+                    return True
+    except Exception:
+        log.exception("send_photo_with_caption path=%s", photo_path)
+    try:
+        if target_msg is not None:
+            await target_msg.reply(str(caption)[:3500], components=kb)
+            return False
+    except Exception:
+        log.exception("send_photo fallback text")
+    return False
+
+
+def legendary_image_path(image_path):
+    if not image_path:
+        return None
+    p = Path(str(image_path))
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    return p
+
+
+async def send_legendary_shop(target_msg, bot, game, pid: int, out_text=None):
+    """Intro + separate photo message per legendary item with working Buy button."""
+    defs = await game.legendary.list_defs()
+    bal = await game.legendary.ensure_wallet(pid)
+    intro = (
+        "🎁 فروشگاه آیتم‌های لجندری" + "\n"
+        + f"کیف پول شما: {int(bal):,} تومان" + "\n\n"
+        + "هر آیتم در یک پیام جدا (عکس + توضیحات + دکمه خرید) ارسال می‌شود."
+    )
+    if out_text is not None:
+        await out_text(intro, ik([back_row()]))
+    elif target_msg is not None:
+        await target_msg.reply(intro, components=ik([back_row()]))
+    for d in defs:
+        card = game.legendary.card_text(d, bal)
+        kb = ik([
+            [("✅ خرید این آیتم", "ng:legbuy:" + str(d["item_code"]))],
+            [("🔄 بروزرسانی فروشگاه", "ng:legshop")],
+            back_row(),
+        ])
+        img = legendary_image_path(d.get("image_path"))
+        await send_photo_with_caption(target_msg, bot, img, card, kb)
 
 
 def register_handlers(bot, app_ctx: dict):
@@ -1521,14 +1587,7 @@ def register_handlers(bot, app_ctx: dict):
                 )
                 return
             if data == "ng:legshop":
-                defs = await game.legendary.list_defs()
-                bal = await game.legendary.ensure_wallet(pid)
-                rows = []
-                lines = ["🎁 فروشگاه آیتم‌های لجندری", f"کیف پول: {int(bal):,} تومان", ""]
-                for d in defs:
-                    rows.append([(d["name_fa"], f"ng:legitem:{d['item_code']}")])
-                rows.append(back_row())
-                await out("\n".join(lines) + "یک آیتم را انتخاب کنید:", ik(rows))
+                await send_legendary_shop(msg, bot, game, pid, out_text=out)
                 return
             if data.startswith("ng:legitem:"):
                 code_i = data.split(":")[-1]
@@ -1537,20 +1596,29 @@ def register_handlers(bot, app_ctx: dict):
                     await out("آیتم یافت نشد")
                     return
                 bal = await game.legendary.ensure_wallet(pid)
-                rows = [
-                    [("✅ خرید آیتم", f"ng:legbuy:{code_i}")],
-                    [("⬅️ فروشگاه لجندری", "ng:legshop")],
+                kb = ik([
+                    [("✅ خرید این آیتم", f"ng:legbuy:{code_i}")],
+                    [("🔄 فروشگاه لجندری", "ng:legshop")],
                     back_row(),
-                ]
-                await out(game.legendary.card_text(d, bal), ik(rows))
+                ])
+                await send_photo_with_caption(
+                    msg, bot, legendary_image_path(d.get("image_path")),
+                    game.legendary.card_text(d, bal), kb,
+                )
                 return
             if data.startswith("ng:legbuy:"):
                 code_i = data.split(":")[-1]
                 try:
-                    msg = await game.legendary.buy(pid, code_i)
-                    await out(msg, ik([[("🎁 فروشگاه لجندری", "ng:legshop")], back_row()]))
+                    result = await game.legendary.buy(pid, code_i)
+                    await out(
+                        result,
+                        ik([
+                            [("🎁 بازگشت به فروشگاه لجندری", "ng:legshop")],
+                            [("🎁 استفاده از آیتم", "ng:leguse")],
+                            back_row(),
+                        ]),
+                    )
                 except Exception as e:
-                    from modules.ng.legendary import LegendaryError
                     await out(f"❌ {e}")
                 return
             if data == "ng:leguse":
