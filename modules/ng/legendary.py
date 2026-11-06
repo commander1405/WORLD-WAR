@@ -97,6 +97,11 @@ class LegendaryService:
                 player_id INTEGER PRIMARY KEY,
                 balance REAL NOT NULL DEFAULT 0
             )""",
+            """CREATE TABLE IF NOT EXISTS ng_media_cache (
+                cache_key TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
             """CREATE TABLE IF NOT EXISTS ng_wallet_tx (
                 id INTEGER PRIMARY KEY,
                 player_id INTEGER NOT NULL,
@@ -266,6 +271,48 @@ class LegendaryService:
         )
 
     # ---- shop ----
+
+    async def get_media_file_id(self, cache_key: str) -> Optional[str]:
+        row = await self.db.fetchrow(
+            "SELECT file_id FROM ng_media_cache WHERE cache_key=$1", (str(cache_key),)
+        )
+        if not row:
+            return None
+        fid = str(row.get("file_id") or "").strip()
+        return fid or None
+
+    async def set_media_file_id(self, cache_key: str, file_id: str) -> None:
+        fid = str(file_id or "").strip()
+        if not fid:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        key = str(cache_key)
+        exists = await self.db.fetchrow(
+            "SELECT cache_key FROM ng_media_cache WHERE cache_key=$1", (key,)
+        )
+        if exists:
+            await self.db.execute(
+                "UPDATE ng_media_cache SET file_id=$1, updated_at=$2 WHERE cache_key=$3",
+                (fid, now, key),
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO ng_media_cache (cache_key, file_id, updated_at) VALUES ($1,$2,$3)",
+                (key, fid, now),
+            )
+
+    async def owns_item(self, pid: int, item_code: str) -> bool:
+        """True if player has at least one usable stack of this legendary item."""
+        row = await self.db.fetchrow(
+            """
+            SELECT 1 AS ok FROM ng_player_legendary
+            WHERE player_id=$1 AND item_code=$2 AND uses_left>0
+            LIMIT 1
+            """,
+            (int(pid), str(item_code)),
+        )
+        return bool(row)
+
     async def list_defs(self) -> list[dict]:
         rows = await self.db.fetch(
             "SELECT * FROM ng_legendary_defs WHERE active=1 ORDER BY name_fa"
@@ -315,6 +362,11 @@ class LegendaryService:
         d = await self.get_def(item_code)
         if not d or not int(d.get("active") or 0):
             raise LegendaryError("آیتم در فروشگاه نیست.")
+        if await self.owns_item(pid, item_code):
+            raise LegendaryError(
+                "این آیتم را قبلاً خریده‌اید و هنوز استفاده باقی دارد. "
+                "پس از اتمام استفاده‌ها می‌توانید دوباره بخرید."
+            )
         price = float(d["price"])
         uses = int(d.get("uses_per_unit") or USES_PER_UNIT)
         now = datetime.now(timezone.utc).isoformat()

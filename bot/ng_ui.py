@@ -162,7 +162,7 @@ def legendary_image_path(image_path):
 
 
 def load_photo_input(photo_path):
-    """Bale treats str InputFile as file_id — local files must be bytes."""
+    """Local file as bytes for first-time upload."""
     if photo_path is None:
         return None
     p = Path(photo_path)
@@ -176,14 +176,59 @@ def load_photo_input(photo_path):
     return InputFile(data, file_name=p.name)
 
 
-async def send_photo_with_caption(target_msg, bot, photo_path, caption: str, kb=None):
+def extract_photo_file_id(message) -> str | None:
+    """Pick largest photo size file_id from a sent Message."""
+    if message is None:
+        return None
+    photos = getattr(message, "photos", None) or getattr(message, "photo", None)
+    if not photos:
+        return None
+    try:
+        items = list(photos)
+    except TypeError:
+        items = [photos]
+    best = None
+    best_area = -1
+    for ph in items:
+        fid = getattr(ph, "file_id", None) or getattr(ph, "id", None)
+        if not fid:
+            continue
+        w = int(getattr(ph, "width", 0) or 0)
+        h = int(getattr(ph, "height", 0) or 0)
+        area = w * h
+        if area >= best_area:
+            best_area = area
+            best = str(fid)
+    return best
+
+
+async def send_photo_with_caption(
+    target_msg, bot, photo_path, caption: str, kb=None, *, file_id: str | None = None
+):
+    """Send photo by cached file_id when possible so clients need not re-download."""
     caption = str(caption or "")[:1024]
+    sent = None
+    # 1) Prefer cached file_id (no re-upload)
+    if file_id:
+        try:
+            photo = InputFile(str(file_id))
+            if target_msg is not None and hasattr(target_msg, "reply_photo"):
+                sent = await target_msg.reply_photo(photo, caption=caption, components=kb)
+                return True, extract_photo_file_id(sent) or file_id
+            chat_id = _extract_chat_id(target_msg)
+            if chat_id is not None and bot is not None:
+                sent = await bot.send_photo(chat_id, photo, caption=caption, components=kb)
+                return True, extract_photo_file_id(sent) or file_id
+        except Exception:
+            log.exception("send by cached file_id failed; will re-upload")
+
+    # 2) Upload local bytes once
     photo = load_photo_input(photo_path)
     if photo is not None:
         try:
             if target_msg is not None and hasattr(target_msg, "reply_photo"):
-                await target_msg.reply_photo(photo, caption=caption, components=kb)
-                return True
+                sent = await target_msg.reply_photo(photo, caption=caption, components=kb)
+                return True, extract_photo_file_id(sent)
         except Exception:
             log.exception("reply_photo failed path=%s", photo_path)
         try:
@@ -191,18 +236,20 @@ async def send_photo_with_caption(target_msg, bot, photo_path, caption: str, kb=
             if chat_id is not None and bot is not None:
                 photo2 = load_photo_input(photo_path)
                 if photo2 is not None:
-                    await bot.send_photo(chat_id, photo2, caption=caption, components=kb)
-                    return True
+                    sent = await bot.send_photo(chat_id, photo2, caption=caption, components=kb)
+                    return True, extract_photo_file_id(sent)
         except Exception:
             log.exception("bot.send_photo failed path=%s", photo_path)
+
+    # 3) Text fallback
     try:
         if target_msg is not None:
             note = "\n\n(عکس آیتم روی سرور پیدا نشد)" if photo is None else ""
             await target_msg.reply((caption + note)[:3500], components=kb)
-            return False
+            return False, None
     except Exception:
         log.exception("photo fallback text failed")
-    return False
+    return False, None
 
 
 async def send_legendary_shop(target_msg, bot, game, pid: int, out_text=None):
@@ -211,23 +258,34 @@ async def send_legendary_shop(target_msg, bot, game, pid: int, out_text=None):
     intro = (
         "🎁 فروشگاه آیتم‌های لجندری" + "\n"
         + f"کیف پول شما: {int(bal):,} تومان" + "\n\n"
-        + "هر آیتم جداگانه با عکس و دکمه خرید ارسال می‌شود."
+        + "هر آیتم جداگانه با عکس ارسال می‌شود. عکس‌ها پس از اولین بار از سرور Bale کش می‌شوند."
     )
     if out_text is not None:
         await out_text(intro)
     elif target_msg is not None:
         await target_msg.reply(intro)
     for d in defs:
+        code = str(d["item_code"])
         card = game.legendary.card_text(d, bal)
-        kb = ik([
-            [("✅ خرید این آیتم", "ng:legbuy:" + str(d["item_code"]))],
-        ])
+        owned = await game.legendary.owns_item(pid, code)
+        if owned:
+            kb = ik([[("✔️ خریداری شده", "ng:legowned:" + code)]])
+        else:
+            kb = ik([[("✅ خرید این آیتم", "ng:legbuy:" + code)]])
         img = legendary_image_path(d.get("image_path"))
-        ok = await send_photo_with_caption(target_msg, bot, img, card, kb)
+        cache_key = f"legendary:{code}"
+        cached_id = await game.legendary.get_media_file_id(cache_key)
+        ok, new_fid = await send_photo_with_caption(
+            target_msg, bot, img, card, kb, file_id=cached_id
+        )
+        if new_fid and new_fid != cached_id:
+            try:
+                await game.legendary.set_media_file_id(cache_key, new_fid)
+            except Exception:
+                log.exception("cache file_id failed for %s", code)
         log.info(
-            "legendary card item=%s ok=%s path=%s exists=%s",
-            d.get("item_code"), ok, img,
-            bool(img and Path(img).exists()) if img else False,
+            "legendary card item=%s ok=%s cached=%s new_fid=%s owned=%s",
+            code, ok, bool(cached_id), bool(new_fid), owned,
         )
 
 
@@ -1688,6 +1746,13 @@ def register_handlers(bot, app_ctx: dict):
             if data == "ng:legshop":
                 await send_legendary_shop(msg, bot, game, pid, out_text=out)
                 return
+            if data.startswith("ng:legowned:"):
+                await out(
+                    "✔️ این آیتم را قبلاً خریداری کرده‌اید و هنوز استفاده باقی دارد."
+                    + "\n"
+                    + "نیازی به خرید مجدد نیست. پس از اتمام استفاده‌ها دوباره می‌توانید بخرید."
+                )
+                return
             if data.startswith("ng:legitem:"):
                 code_i = data.split(":")[-1]
                 d = await game.legendary.get_def(code_i)
@@ -1695,17 +1760,38 @@ def register_handlers(bot, app_ctx: dict):
                     await out("آیتم یافت نشد")
                     return
                 bal = await game.legendary.ensure_wallet(pid)
-                kb = ik([
-                    [("✅ خرید این آیتم", f"ng:legbuy:{code_i}")],
-                ])
-                await send_photo_with_caption(
+                owned = await game.legendary.owns_item(pid, code_i)
+                if owned:
+                    kb = ik([[("✔️ خریداری شده", f"ng:legowned:{code_i}")]])
+                else:
+                    kb = ik([[("✅ خرید این آیتم", f"ng:legbuy:{code_i}")]])
+                cache_key = f"legendary:{code_i}"
+                cached_id = await game.legendary.get_media_file_id(cache_key)
+                ok, new_fid = await send_photo_with_caption(
                     msg, bot, legendary_image_path(d.get("image_path")),
-                    game.legendary.card_text(d, bal), kb,
+                    game.legendary.card_text(d, bal), kb, file_id=cached_id,
                 )
+                if new_fid and new_fid != cached_id:
+                    try:
+                        await game.legendary.set_media_file_id(cache_key, new_fid)
+                    except Exception:
+                        log.exception("cache file_id")
                 return
             if data.startswith("ng:legbuy:"):
                 code_i = data.split(":")[-1]
                 try:
+                    if await game.legendary.owns_item(pid, code_i):
+                        await out(
+                            "✔️ این آیتم را قبلاً خریده‌اید و هنوز استفاده باقی دارد."
+                            + "\n"
+                            + "تا تمام شدن استفاده‌ها خرید مجدد ممکن نیست.",
+                            ik([
+                                [("🎁 بازگشت به فروشگاه لجندری", "ng:legshop")],
+                                [("🎁 استفاده از آیتم", "ng:leguse")],
+                                back_row(),
+                            ]),
+                        )
+                        return
                     result = await game.legendary.buy(pid, code_i)
                     await out(
                         result,
