@@ -25,17 +25,49 @@ MAIN_GROUP = "@warworld3"
 
 
 async def daily_loop(game: Game):
+    """Pay daily income only after Tehran midnight; workshop jobs every minute."""
+    from datetime import datetime, timedelta, time as dtime
+    from zoneinfo import ZoneInfo
+    TEHRAN = ZoneInfo("Asia/Tehran")
     while True:
         try:
-            n = await game.daily_payout_all()
-            if n:
-                log.info("Daily payout countries=%s", n)
+            now = datetime.now(TEHRAN)
+            today = now.date().isoformat()
+            meta = await game.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
+            last = (meta or {}).get("last_daily_date")
+            # Pay once when Tehran calendar day advances (right after 00:00)
+            if last != today and now.hour == 0:
+                n = await game.daily_payout_all()
+                try:
+                    await game.db.execute(
+                        "UPDATE world_meta SET last_daily_date=$1 WHERE id=1", (today,)
+                    )
+                except Exception:
+                    log.exception("set last_daily_date")
+                if n:
+                    log.info("Daily payout countries=%s date=%s", n, today)
+            elif last != today and now.hour > 0:
+                # Bot was offline at midnight — catch up once after restart
+                n = await game.daily_payout_all()
+                try:
+                    await game.db.execute(
+                        "UPDATE world_meta SET last_daily_date=$1 WHERE id=1", (today,)
+                    )
+                except Exception:
+                    log.exception("set last_daily_date catchup")
+                if n:
+                    log.info("Daily payout catch-up countries=%s date=%s", n, today)
             done = await game.complete_due_jobs()
             if done:
                 log.info("Workshop jobs completed=%s", done)
         except Exception:
             log.exception("daily/workshop loop")
-        await asyncio.sleep(60)
+        # Near midnight check more often
+        now = datetime.now(TEHRAN)
+        if now.hour == 23 or now.hour == 0:
+            await asyncio.sleep(20)
+        else:
+            await asyncio.sleep(60)
 
 
 async def group_log_loop(game: Game, bot):

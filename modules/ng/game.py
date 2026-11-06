@@ -48,6 +48,8 @@ class Game:
             )
         for stmt in (
             "ALTER TABLE ng_countries ADD COLUMN double_hp INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ng_countries ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'country'",
+            "ALTER TABLE world_meta ADD COLUMN last_daily_date TEXT",
             """CREATE TABLE IF NOT EXISTS ng_defense_hits (
                 country_code TEXT PRIMARY KEY,
                 hits INTEGER NOT NULL DEFAULT 0,
@@ -92,6 +94,8 @@ class Game:
         """Re-run catalog seed so new items appear without full world reset."""
         for stmt in (
             "ALTER TABLE ng_countries ADD COLUMN double_hp INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ng_countries ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'country'",
+            "ALTER TABLE world_meta ADD COLUMN last_daily_date TEXT",
             """CREATE TABLE IF NOT EXISTS ng_defense_hits (
                 country_code TEXT PRIMARY KEY,
                 hits INTEGER NOT NULL DEFAULT 0,
@@ -156,20 +160,41 @@ class Game:
             if exists:
                 continue
             # free country — no treasury until claimed
+            et = str(c.get("entity_type") or "country")
+            npt = 0 if et == "group" else int(c.get("npt", 1))
             await self.db.execute(
                 """
                 INSERT INTO ng_countries (
                     country_code, name_fa, name_en, flag, capital_fa, leader_fa, leader_title_fa,
-                    currency_code, currency_name_fa, npt_member, owner_player_id, treasury, hp, max_hp, is_destroyed
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,0,1000,1000,0)
+                    currency_code, currency_name_fa, npt_member, owner_player_id, treasury, hp, max_hp, is_destroyed, entity_type
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,0,1000,1000,0,$11)
                 """,
                 (
                     c["code"], c["name_fa"], c["name_en"], c["flag"], c["capital_fa"],
                     c["leader_fa"], c["leader_title_fa"], c["currency_code"], c["currency_name_fa"],
-                    int(c.get("npt", 1)),
+                    npt, et,
                 ),
             )
 
+
+
+        # Sync entity_type / force NPT off for groups without wiping ownership
+        try:
+            data = json.loads(SEED_PATH.read_text(encoding="utf-8"))
+            for c in data:
+                et = str(c.get("entity_type") or "country")
+                if et == "group":
+                    await self.db.execute(
+                        "UPDATE ng_countries SET entity_type='group', npt_member=0 WHERE country_code=$1",
+                        (c["code"],),
+                    )
+                else:
+                    await self.db.execute(
+                        "UPDATE ng_countries SET entity_type=COALESCE(NULLIF(entity_type,''),'country') WHERE country_code=$1",
+                        (c["code"],),
+                    )
+        except Exception:
+            log.exception("entity_type sync")
 
     async def ensure_un_country(self) -> None:
         """Ensure UN country exists and is permanently owned by the bot owner."""
@@ -322,7 +347,16 @@ class Game:
         return await self.resolve_country_for_player(pid, include_un_for_owner=False)
 
     # ---------- claim ----------
+    async def is_group(self, code: str | None) -> bool:
+        if not code:
+            return False
+        row = await self.db.fetchrow(
+            "SELECT entity_type FROM ng_countries WHERE country_code=$1", (code,)
+        )
+        return bool(row) and str(row.get("entity_type") or "country") == "group"
+
     async def list_countries(self, *, for_owner: bool = False, include_un: bool = False) -> list[dict]:
+
         rows = await self.db.fetch(
             "SELECT * FROM ng_countries WHERE is_destroyed=0 ORDER BY name_fa"
         )
@@ -935,13 +969,13 @@ class Game:
         base = raw / (raw + 120.0) * 0.72
         base = min(self.DEFENSE_COVER_CAP, max(0.0, base))
         # effectiveness by attack type
-        kind_factor = {"air": 1.0, "ground": 0.4, "sea": 0.25, "nuclear": 0.15}.get(attack_kind, 0.5)
+        kind_factor = {"air": 1.0, "ground": 0.55, "sea": 0.45, "nuclear": 0.2}.get(attack_kind, 0.5)
         disable = await self.active_cyber_disable_ratio(code)
         bonus = 0.0
         try:
-            if kind in ("air", "missile", "nuke"):
+            if attack_kind in ("air", "missile", "nuke"):
                 bonus += await self.control.defense_air_bonus(code)
-            if kind in ("sea", "naval"):
+            if attack_kind in ("sea", "naval"):
                 bonus += await self.control.defense_sea_bonus(code)
         except Exception:
             pass
@@ -2748,6 +2782,8 @@ class Game:
     async def request_npt_change(self, code: str, pid: int, request_type: str) -> str:
         if request_type not in ("join", "leave"):
             raise GameError("نوع درخواست نامعتبر")
+        if await self.is_group(code):
+            raise GameError("گروهک‌ها امکان عضویت یا درخواست NPT ندارند.")
         c = await self.db.fetchrow(
             "SELECT * FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
             (code, pid),
@@ -3611,9 +3647,30 @@ class Game:
             ),
         )
 
+
+    async def admin_set_hp(self, actor: int, target_player_id: int, hp: float) -> str:
+        if not self.is_owner(actor):
+            raise GameError("مجاز نیستید")
+        code = await self.resolve_country_for_player(int(target_player_id))
+        if not code:
+            raise GameError("این بازیکن کشور ندارد")
+        c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
+        if not c:
+            raise GameError("کشور یافت نشد")
+        max_hp = float(c.get("max_hp") or 1000) or 1000
+        hp = max(0.0, min(max_hp, float(hp)))
+        await self.db.execute(
+            "UPDATE ng_countries SET hp=$1 WHERE country_code=$2", (hp, code)
+        )
+        await self.admin_log(actor, "set_hp", f"{code}={hp}/{max_hp}")
+        name = c.get("name_fa") or code
+        return f"✅ HP «{name}» روی {int(hp)} / {int(max_hp)} تنظیم شد."
+
     async def admin_set_npt(self, actor: int, code: str, member: bool) -> str:
         if not self.is_owner(actor):
             raise GameError("مجاز نیستید")
+        if member and await self.is_group(code):
+            raise GameError("گروهک‌ها عضو NPT نمی‌شوند")
         c = await self.db.fetchrow("SELECT country_code FROM ng_countries WHERE country_code=$1", (code,))
         if not c:
             raise GameError("کشور یافت نشد")

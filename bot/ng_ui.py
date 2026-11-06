@@ -696,16 +696,33 @@ def register_handlers(bot, app_ctx: dict):
 
             if text == BTN_PICK:
                 if code:
-                    await reply(message, "شما هم‌اکنون یک کشور دارید.", main_kb(owner))
+                    await reply(message, "شما هم‌اکنون یک کشور/گروهک دارید.", main_kb(owner))
                     return
+                countries = await game.list_countries()
+                free_c = [c for c in countries if not c.get("owner_player_id") and str(c.get("entity_type") or "country") != "group"]
+                free_g = [c for c in countries if not c.get("owner_player_id") and str(c.get("entity_type") or "") == "group"]
                 rows = []
-                for c in await game.list_countries():
-                    if c.get("owner_player_id"):
-                        rows.append([(f"❌ {c['flag']} {c['name_fa']} (دارای بازیکن)", "ng:busy")])
-                    else:
-                        rows.append([(f"✅ {c['flag']} {c['name_fa']}", f"ng:claim:{c['country_code']}")])
+                if free_c:
+                    rows.append([("—— کشورها ——", "ng:noop")])
+                for c in free_c[:40]:
+                    rows.append([(f"{c.get('flag','')} {c['name_fa']}", f"ng:claim:{c['country_code']}")])
+                if free_g:
+                    rows.append([("—— گروهک‌ها ——", "ng:noop")])
+                    for c in free_g:
+                        rows.append([(f"⬛ {c['name_fa']}", f"ng:claim:{c['country_code']}")])
                 rows.append(back_row())
-                await reply(message, "🗺 کشور آزاد را انتخاب کنید:", ik(rows))
+                if not free_c and not free_g:
+                    await reply(message, "همه کشورها و گروهک‌ها انتخاب شده‌اند.", main_kb(owner))
+                else:
+                    await reply(
+                        message,
+                        chr(10).join([
+                            "🗺 انتخاب کنید:",
+                            "کشورها و گروهک‌های آزاد را می‌بینید.",
+                            "گروهک‌ها عضو NPT نمی‌شوند.",
+                        ]),
+                        ik(rows),
+                    )
                 return
 
             if text == BTN_MY:
@@ -1020,7 +1037,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc") or data.startswith("ng:ogiveall") or data.startswith("ng:odaily") or data.startswith("ng:ohp"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc") or data.startswith("ng:ogiveall") or data.startswith("ng:odaily") or data.startswith("ng:ohp") or data.startswith("ng:osethp"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -1467,6 +1484,82 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
 
+
+            if data == "ng:noop":
+                await out("این فقط یک عنوان است.")
+                return
+
+            # cyber / defense status
+            if data == "ng:cyber" or data.startswith("ng:cyber:"):
+                if not code:
+                    await out("ابتدا کشور/گروهک انتخاب کنید.")
+                    return
+                if data == "ng:cyber":
+                    rows = [
+                        [("🛡 هکر پدافند", "ng:cyber:hackdef")],
+                        [("💰 هکر دارایی", "ng:cyber:hackasset")],
+                        [("📊 وضعیت پدافند من", "ng:mydef")],
+                        back_row(),
+                    ]
+                    await out(
+                        chr(10).join([
+                            "💻 هک و امنیت",
+                            "هکر پدافند: اختلال موقت ۳۰٪ پدافند هدف (۲ دقیقه)",
+                            "هکر دارایی: گزارش دارایی‌های هدف (بدون تغییر)",
+                        ]),
+                        ik(rows),
+                    )
+                    return
+                action = data.split(":")[-1]
+                countries = [
+                    c for c in await game.list_countries()
+                    if c.get("owner_player_id") and c["country_code"] != code
+                ]
+                if action == "hackdef":
+                    rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:chdef:{c['country_code']}")] for c in countries[:30]]
+                    rows.append(back_row())
+                    await out("هدف هکر پدافند را انتخاب کنید:", ik(rows))
+                    return
+                if action == "hackasset":
+                    rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:chasset:{c['country_code']}")] for c in countries[:30]]
+                    rows.append(back_row())
+                    await out("هدف هکر دارایی را انتخاب کنید:", ik(rows))
+                    return
+                return
+            if data.startswith("ng:chdef:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                dst = data.split(":")[-1]
+                try:
+                    await out(await game.hack_defense(code, dst, pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data.startswith("ng:chasset:"):
+                if not code:
+                    await out("کشور ندارید")
+                    return
+                dst = data.split(":")[-1]
+                try:
+                    await out(await game.hack_assets(code, dst, pid))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:mydef":
+                if not code:
+                    await out("ابتدا کشور/گروهک انتخاب کنید.")
+                    return
+                try:
+                    await out(await game.cyber_status_text(code), ik([
+                        [("💻 هک و امنیت", "ng:cyber")],
+                        back_row(),
+                    ]))
+                except Exception as e:
+                    log.exception("mydef")
+                    await out(f"❌ {e}")
+                return
+
             # attack
             if data == "ng:atkmenu" or data.startswith("ng:atk:") or data.startswith("ng:fight:") or data.startswith("ng:nuke"):
                 meta = await game.db.fetchrow("SELECT war_enabled FROM world_meta WHERE id=1")
@@ -1501,7 +1594,7 @@ def register_handlers(bot, app_ctx: dict):
                         rows.append([(f"{label} ۱۰۰٪", f"ng:fight:{dst}:{kind}:100")])
                 # atomic option if has bomb
                 bombs = await game.db.fetchrow(
-                    "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='item_atom_bomb'",
+                    "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='nuke_bomb'",
                     (code,),
                 )
                 if bombs and float(bombs["quantity"]) >= 1:
@@ -1575,6 +1668,9 @@ def register_handlers(bot, app_ctx: dict):
             if data.startswith("ng:npt:"):
                 if not code:
                     await out("کشور ندارید")
+                    return
+                if await game.is_group(code):
+                    await out("گروهک‌ها امکان NPT ندارند.")
                     return
                 action = data.split(":")[-1]
                 rows = [[("✅ تأیید درخواست", f"ng:nptgo:{action}"), ("❌ انصراف", "ng:home")]]
@@ -2221,6 +2317,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("📦 دارایی‌ها", f"ng:ouinv:{tid}"), ("💰 پول", f"ng:oum:{tid}")],
                     [("NPT وضعیت", f"ng:ounpt:{tid}")],
                     [("➕ NPT", f"ng:ounptadd:{tid}"), ("➖ NPT", f"ng:ounptdel:{tid}")],
+                    [("❤️ تنظیم HP", f"ng:osethp:{tid}")],
                     [("💵 دادن پول", f"ng:ougive:{tid}"), ("💸 گرفتن پول", f"ng:outake:{tid}")],
                     [("🧾 مالیات از کاربر", f"ng:outax:{tid}")],
                     [("🧬 جان ×۲ روشن", f"ng:oudblon:{tid}"), ("🧬 جان ×۲ خاموش", f"ng:oudbloff:{tid}")],

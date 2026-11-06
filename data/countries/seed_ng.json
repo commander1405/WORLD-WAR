@@ -10,7 +10,8 @@
     "currency_code": "IRR",
     "currency_name_fa": "تومان",
     "npt": 1,
-    "capital_mult": 0.7
+    "capital_mult": 0.7,
+    "entity_type": "country"
   },
   {
     "code": "US",
@@ -23,7 +24,8 @@
     "currency_code": "USD",
     "currency_name_fa": "دلار",
     "npt": 1,
-    "capital_mult": 1.0
+    "capital_mult": 1.0,
+    "entity_type": "country"
   },
   {
     "code": "CN",
@@ -36,7 +38,8 @@
     "currency_code": "CNY",
     "currency_name_fa": "یوان",
     "npt": 1,
-    "capital_mult": 0.95
+    "capital_mult": 0.95,
+    "entity_type": "country"
   },
   {
     "code": "RU",
@@ -49,7 +52,8 @@
     "currency_code": "RUB",
     "currency_name_fa": "روبل",
     "npt": 1,
-    "capital_mult": 0.85
+    "capital_mult": 0.85,
+    "entity_type": "country"
   },
   {
     "code": "DE",
@@ -62,7 +66,8 @@
     "currency_code": "EUR",
     "currency_name_fa": "یورو",
     "npt": 1,
-    "capital_mult": 0.95
+    "capital_mult": 0.95,
+    "entity_type": "country"
   },
   {
     "code": "FR",
@@ -75,7 +80,8 @@
     "currency_code": "EUR",
     "currency_name_fa": "یورو",
     "npt": 1,
-    "capital_mult": 0.95
+    "capital_mult": 0.95,
+    "entity_type": "country"
   },
   {
     "code": "GB",
@@ -88,7 +94,8 @@
     "currency_code": "GBP",
     "currency_name_fa": "پوند",
     "npt": 1,
-    "capital_mult": 0.95
+    "capital_mult": 0.95,
+    "entity_type": "country"
   },
   {
     "code": "TR",
@@ -101,7 +108,8 @@
     "currency_code": "TRY",
     "currency_name_fa": "لیر",
     "npt": 1,
-    "capital_mult": 0.75
+    "capital_mult": 0.75,
+    "entity_type": "country"
   },
   {
     "code": "SA",
@@ -114,7 +122,8 @@
     "currency_code": "SAR",
     "currency_name_fa": "ریال",
     "npt": 1,
-    "capital_mult": 0.9
+    "capital_mult": 0.9,
+    "entity_type": "country"
   },
   {
     "code": "IL",
@@ -127,7 +136,8 @@
     "currency_code": "ILS",
     "currency_name_fa": "شِکِل",
     "npt": 0,
-    "capital_mult": 0.9
+    "capital_mult": 0.9,
+    "entity_type": "country"
   },
   {
     "code": "IN",
@@ -140,7 +150,8 @@
     "currency_code": "INR",
     "currency_name_fa": "روپیه",
     "npt": 0,
-    "capital_mult": 0.8
+    "capital_mult": 0.8,
+    "entity_type": "country"
   },
   {
     "code": "PK",
@@ -153,7 +164,8 @@
     "currency_code": "PKR",
     "currency_name_fa": "روپیه",
     "npt": 0,
-    "capital_mult": 0.65
+    "capital_mult": 0.65,
+    "entity_type": "country"
   },
   {
     "code": "JP",
@@ -166,7 +178,8 @@
     "currency_code": "JPY",
     "currency_name_fa": "ین",
     "npt": 1,
-    "capital_mult": 0.95
+    "capital_mult": 0.95,
+    "entity_type": "country"
   },
   {
     "code": "KR",
@@ -179,7 +192,8 @@
     "currency_code": "KRW",
     "currency_name_fa": "وون",
     "npt": 1,
-    "capital_mult": 0.9
+    "capital_mult": 0.9,
+    "entity_type": "country"
   },
   {
     "code": "KP",
@@ -192,7 +206,8 @@
     "currency_code": "KPW",
     "currency_name_fa": "وون",
     "npt": 0,
-    "capital_mult": 0.55
+    "capital_mult": 0.55,
+    "entity_type": "country"
   },
   {
     "code": "BR",
@@ -205,7 +220,8 @@
     "currency_code": "BRL",
     "currency_name_fa": "رئال",
     "npt": 1,
-    "capital_mult": 0.8
+    "capital_mult": 0.8,
+    "entity_type": "country"
   },
   {
     "code": "CA",
@@ -218,7 +234,8 @@
     "currency_code": "CAD",
     "currency_name_fa": "دلار کانادا",
     "npt": 1,
-    "capital_mult": 0.9
+    "capital_mult": 0.9,
+    "entity_type": "country"
   },
   {
     "code": "AU",
@@ -231,7 +248,8 @@
     "currency_code": "AUD",
     "currency_name_fa": "دلار استرالیا",
     "npt": 1,
-    "capital_mult": 0.9
+    "capital_mult": 0.9,
+    "entity_type": "country"
   },
   {
     "code": "EG",
@@ -244,7 +262,8 @@
     "currency_code": "EGP",
     "currency_name_fa": "پوند",
     "npt": 1,
-    "capital_mult": 0.65
+    "capital_mult": 0.65,
+    "entity_type": "country"
   },
   {
     "code": "AE",
@@ -257,7 +276,8 @@
     "currency_code": "AED",
     "currency_name_fa": "درهم",
     "npt": 1,
-    "capital_mult": 0.95
+    "capital_mult": 0.95,
+    "entity_type": "country"
   },
   {
     "code": "IQ",
@@ -270,7 +290,8 @@
     "currency_code": "IQD",
     "currency_name_fa": "دینار",
     "npt": 1,
-    "capital_mult": 0.6
+    "capital_mult": 0.6,
+    "entity_type": "country"
   },
   {
     "code": "AF",
@@ -283,7 +304,8 @@
     "currency_code": "AFN",
     "currency_name_fa": "افغانی",
     "npt": 1,
-    "capital_mult": 0.45
+    "capital_mult": 0.45,
+    "entity_type": "country"
   },
   {
     "code": "UA",
@@ -296,7 +318,8 @@
     "currency_code": "UAH",
     "currency_name_fa": "هریونیا",
     "npt": 1,
-    "capital_mult": 0.7
+    "capital_mult": 0.7,
+    "entity_type": "country"
   },
   {
     "code": "IT",
@@ -309,7 +332,8 @@
     "currency_code": "EUR",
     "currency_name_fa": "یورو",
     "npt": 1,
-    "capital_mult": 0.9
+    "capital_mult": 0.9,
+    "entity_type": "country"
   },
   {
     "code": "ES",
@@ -322,7 +346,8 @@
     "currency_code": "EUR",
     "currency_name_fa": "یورو",
     "npt": 1,
-    "capital_mult": 0.9
+    "capital_mult": 0.9,
+    "entity_type": "country"
   },
   {
     "code": "PL",
@@ -335,7 +360,8 @@
     "currency_code": "PLN",
     "currency_name_fa": "زلوتی",
     "npt": 1,
-    "capital_mult": 0.85
+    "capital_mult": 0.85,
+    "entity_type": "country"
   },
   {
     "code": "MX",
@@ -348,7 +374,8 @@
     "currency_code": "MXN",
     "currency_name_fa": "پزو",
     "npt": 1,
-    "capital_mult": 0.75
+    "capital_mult": 0.75,
+    "entity_type": "country"
   },
   {
     "code": "ID",
@@ -361,7 +388,8 @@
     "currency_code": "IDR",
     "currency_name_fa": "روپیه",
     "npt": 1,
-    "capital_mult": 0.75
+    "capital_mult": 0.75,
+    "entity_type": "country"
   },
   {
     "code": "ZA",
@@ -374,7 +402,8 @@
     "currency_code": "ZAR",
     "currency_name_fa": "رند",
     "npt": 1,
-    "capital_mult": 0.7
+    "capital_mult": 0.7,
+    "entity_type": "country"
   },
   {
     "code": "NG",
@@ -387,7 +416,8 @@
     "currency_code": "NGN",
     "currency_name_fa": "نایره",
     "npt": 1,
-    "capital_mult": 0.6
+    "capital_mult": 0.6,
+    "entity_type": "country"
   },
   {
     "code": "UN",
@@ -402,6 +432,77 @@
     "npt": 1,
     "capital_mult": 1.0,
     "hidden_from_players": true,
-    "is_un": true
+    "is_un": true,
+    "entity_type": "country"
+  },
+  {
+    "code": "ISIS",
+    "name_fa": "داعش",
+    "name_en": "ISIS",
+    "flag": "⬛",
+    "capital_fa": "—",
+    "leader_fa": "—",
+    "leader_title_fa": "فرمانده",
+    "currency_code": "USD",
+    "currency_name_fa": "دلار",
+    "npt": 0,
+    "capital_mult": 0.45,
+    "entity_type": "group"
+  },
+  {
+    "code": "AQ",
+    "name_fa": "القاعده",
+    "name_en": "Al-Qaeda",
+    "flag": "⬛",
+    "capital_fa": "—",
+    "leader_fa": "—",
+    "leader_title_fa": "فرمانده",
+    "currency_code": "USD",
+    "currency_name_fa": "دلار",
+    "npt": 0,
+    "capital_mult": 0.4,
+    "entity_type": "group"
+  },
+  {
+    "code": "TLB",
+    "name_fa": "طالبان",
+    "name_en": "Taliban",
+    "flag": "⬛",
+    "capital_fa": "—",
+    "leader_fa": "—",
+    "leader_title_fa": "فرمانده",
+    "currency_code": "AFN",
+    "currency_name_fa": "افغانی",
+    "npt": 0,
+    "capital_mult": 0.42,
+    "entity_type": "group"
+  },
+  {
+    "code": "BKO",
+    "name_fa": "بوکو حرام",
+    "name_en": "Boko Haram",
+    "flag": "⬛",
+    "capital_fa": "—",
+    "leader_fa": "—",
+    "leader_title_fa": "فرمانده",
+    "currency_code": "NGN",
+    "currency_name_fa": "نایره",
+    "npt": 0,
+    "capital_mult": 0.35,
+    "entity_type": "group"
+  },
+  {
+    "code": "SHB",
+    "name_fa": "الشباب",
+    "name_en": "Al-Shabaab",
+    "flag": "⬛",
+    "capital_fa": "—",
+    "leader_fa": "—",
+    "leader_title_fa": "فرمانده",
+    "currency_code": "SOS",
+    "currency_name_fa": "شیلینگ",
+    "npt": 0,
+    "capital_mult": 0.35,
+    "entity_type": "group"
   }
 ]
