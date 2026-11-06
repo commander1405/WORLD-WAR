@@ -457,7 +457,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("💰 گرفتن مالیات", "ng:otax"), ("⚖️ محکوم کردن کشور", "ng:ocondemn")],
                     [("❤️ دیدن HP ها", "ng:ohp"), ("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
                     [("🎁 مدیریت لجندری", "ng:oleg"), ("💰 شارژ کیف پول", "ng:owallet")],
-                    [("⚙️ قیمت فروشگاه لجندری", "ng:olegprices")],
+                    [("⚙️ قیمت و استفاده لجندری", "ng:olegprices")],
                     [("🏷 قیمت فروشگاه", "ng:oprices"), ("🏷 تخفیف فروشگاه", "ng:odiscount")],
                     [("🔴 ریست کامل جهان", "ng:oreset1")],
                 ]
@@ -878,6 +878,20 @@ def register_handlers(bot, app_ctx: dict):
                     except Exception as e:
                         log.exception("owner_leg_price")
                         await reply(message, f"❌ {e}", ik([cancel_row()]))
+                    return
+                if kind == "owner_leg_uses":
+                    try:
+                        raw = text.strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+                        uses = int(float(raw.replace(",", "").replace("،", "").replace(" ", "")))
+                        ic = st.get("item")
+                        msg = await game.legendary.set_uses(pid, ic, uses)
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(owner))
+                    except GameError as e:
+                        await reply(message, f"❌ {e}", ik([cancel_row()]))
+                    except Exception as e:
+                        log.exception("owner_leg_uses")
+                        await reply(message, "❌ عدد استفاده نامعتبر است. مثال: 20", ik([cancel_row()]))
                     return
                 if kind == "owner_set_hp":
                     try:
@@ -1991,20 +2005,67 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:olegprices":
                 defs = await game.legendary.list_defs()
-                rows = [[(f"{d['name_fa']} — {int(float(d['price'])):,}", f"ng:olegprice:{d['item_code']}")] for d in defs]
+                rows = []
+                for d in defs:
+                    uses = int(d.get("uses_per_unit") or 20)
+                    rows.append([(
+                        f"{d['name_fa']} | {int(float(d['price'])):,}ت | {uses}بار",
+                        f"ng:olegcfg:{d['item_code']}",
+                    )])
                 rows.append(back_row())
-                await out("⚙️ قیمت فروشگاه لجندری:", ik(rows))
+                await out(
+                    "⚙️ تنظیم فروشگاه لجندری" + "\n"
+                    + "آیتم را انتخاب کنید (قیمت / تعداد استفاده):",
+                    ik(rows),
+                )
+                return
+            if data.startswith("ng:olegcfg:"):
+                ic = data.split(":")[-1]
+                d = await game.legendary.get_def(ic)
+                if not d:
+                    await out("آیتم یافت نشد")
+                    return
+                uses = int(d.get("uses_per_unit") or 20)
+                await out(
+                    f"🎁 {d['name_fa']}" + "\n"
+                    + f"قیمت فعلی: {int(float(d['price'])):,} تومان" + "\n"
+                    + f"استفاده فعلی هر خرید: {uses} بار" + "\n\n"
+                    + "کدام را تغییر می‌دهید؟",
+                    ik([
+                        [("💰 تغییر قیمت", f"ng:olegprice:{ic}")],
+                        [("🔢 تغییر تعداد استفاده", f"ng:oleguses:{ic}")],
+                        back_row(),
+                    ]),
+                )
                 return
             if data.startswith("ng:olegprice:"):
                 ic = data.split(":")[-1]
                 d = await game.legendary.get_def(ic)
+                if not d:
+                    await out("آیتم یافت نشد")
+                    return
                 _pending[pid] = {"kind": "owner_leg_price", "item": ic}
                 await out(
-                    f"قیمت فعلی {d['name_fa']}: {int(float(d['price'])):,} تومان\nقیمت جدید را بنویسید:",
+                    f"قیمت فعلی {d['name_fa']}: {int(float(d['price'])):,} تومان" + "\n"
+                    + "قیمت جدید را بنویسید:",
                     ik([cancel_row()]),
                 )
                 return
-
+            if data.startswith("ng:oleguses:"):
+                ic = data.split(":")[-1]
+                d = await game.legendary.get_def(ic)
+                if not d:
+                    await out("آیتم یافت نشد")
+                    return
+                uses = int(d.get("uses_per_unit") or 20)
+                _pending[pid] = {"kind": "owner_leg_uses", "item": ic}
+                await out(
+                    f"تعداد استفاده فعلی {d['name_fa']}: {uses} بار" + "\n"
+                    + "عدد جدید را بنویسید (۱ تا ۱۰۰۰)." + "\n"
+                    + "مثال: 20",
+                    ik([cancel_row()]),
+                )
+                return
 
             # cyber / defense status
             if data == "ng:cyber" or data.startswith("ng:cyber:"):
@@ -2817,7 +2878,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("💵 پول همگانی", "ng:ogiveall"), ("💰 پرداخت درآمد روزانه", "ng:odaily")],
                     [("❤️ دیدن HP ها", "ng:ohp"), ("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
                     [("🎁 مدیریت لجندری", "ng:oleg"), ("💰 شارژ کیف پول", "ng:owallet")],
-                    [("⚙️ قیمت فروشگاه لجندری", "ng:olegprices")],
+                    [("⚙️ قیمت و استفاده لجندری", "ng:olegprices")],
                     [("⬅️ بستن", "ng:home")],
                 ]
                 await out("🛡 پنل مالک / سازمان ملل", ik(rows))

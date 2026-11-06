@@ -338,6 +338,25 @@ class LegendaryService:
         )
         return f"✅ قیمت «{d['name_fa']}» → {int(price):,} تومان"
 
+    async def set_uses(self, actor: int, item_code: str, uses: int) -> str:
+        if not self.g.is_owner(actor):
+            raise LegendaryError("فقط مالک مجاز است.")
+        uses = int(uses)
+        if uses < 1 or uses > 1000:
+            raise LegendaryError("تعداد استفاده باید بین ۱ تا ۱۰۰۰ باشد.")
+        d = await self.get_def(item_code)
+        if not d:
+            raise LegendaryError("آیتم یافت نشد")
+        await self.db.execute(
+            "UPDATE ng_legendary_defs SET uses_per_unit=$1 WHERE item_code=$2",
+            (uses, item_code),
+        )
+        return (
+            f"✅ تعداد استفاده «{d['name_fa']}» → {uses} بار"
+            + "\n"
+            + "(برای خریدهای بعدی اعمال می‌شود؛ آیتم‌های قبلی تغییر نمی‌کنند)"
+        )
+
     def card_text(self, d: dict, wallet: float) -> str:
         dur = int(d.get("duration_sec") or 0)
         if dur > 0:
