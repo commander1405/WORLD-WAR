@@ -792,6 +792,49 @@ def register_handlers(bot, app_ctx: dict):
                         msg = f"❌ {e}"
                     await reply(message, msg, main_kb(owner))
                     return
+                if kind == "owner_wallet_charge":
+                    try:
+                        amount = game.parse_money_amount(text)
+                        tid = int(st.get("target"))
+                        if amount <= 0:
+                            await reply(message, "❌ مبلغ باید بزرگ‌تر از صفر باشد.", ik([cancel_row()]))
+                            return
+                        msg = await game.legendary.admin_charge_wallet(pid, tid, amount)
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(owner))
+                    except GameError as e:
+                        await reply(message, f"❌ {e}", ik([cancel_row()]))
+                    except Exception as e:
+                        log.exception("owner_wallet_charge")
+                        await reply(message, f"❌ خطا در شارژ کیف پول: {e}", ik([cancel_row()]))
+                    return
+                if kind == "owner_leg_price":
+                    try:
+                        price = game.parse_money_amount(text)
+                        ic = st.get("item")
+                        msg = await game.legendary.set_price(pid, ic, price)
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(owner))
+                    except GameError as e:
+                        await reply(message, f"❌ {e}", ik([cancel_row()]))
+                    except Exception as e:
+                        log.exception("owner_leg_price")
+                        await reply(message, f"❌ {e}", ik([cancel_row()]))
+                    return
+                if kind == "owner_set_hp":
+                    try:
+                        raw = text.strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+                        hp = float(raw.replace(",", "").replace("،", ""))
+                        tid = int(st.get("target"))
+                        msg = await game.admin_set_hp(pid, tid, hp)
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(owner))
+                    except GameError as e:
+                        await reply(message, f"❌ {e}", ik([cancel_row()]))
+                    except Exception as e:
+                        log.exception("owner_set_hp")
+                        await reply(message, "❌ عدد HP نامعتبر است", ik([cancel_row()]))
+                    return
 
             # ---- main menu ----
             if text in ("/start", "شروع", "منو", "menu"):
@@ -1766,25 +1809,57 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:owallet" or data.startswith("ng:owallet:"):
                 page = 0
-                if data.startswith("ng:owallet:") and data.count(":") == 2:
+                if data.startswith("ng:owallet:"):
                     try:
                         page = int(data.split(":")[-1])
                     except ValueError:
                         page = 0
+                page = max(0, page)
                 players, total = await game.list_players_page(page)
+                page_size = getattr(game, "PAGE_SIZE", 8) or 8
+                pages = max(1, (total + page_size - 1) // page_size)
+                if page >= pages and total > 0:
+                    page = pages - 1
+                    players, total = await game.list_players_page(page)
                 rows = []
                 for p in players:
-                    name = p.get("display_name") or p.get("username") or str(p["player_id"])
-                    rows.append([(f"{name}", f"ng:owalletsel:{p['player_id']}")])
+                    name = p.get("display_name") or p.get("username") or "بدون‌نام"
+                    cc = p.get("country_code") or "—"
+                    pid_s = p.get("player_id")
+                    rows.append([(f"{name} | {cc} | {pid_s}", f"ng:owalletsel:{pid_s}")])
+                nav = []
+                if page > 0:
+                    nav.append(("⬅️ قبلی", f"ng:owallet:{page-1}"))
+                if (page + 1) * page_size < total:
+                    nav.append(("بعدی ➡️", f"ng:owallet:{page+1}"))
+                if nav:
+                    rows.append(nav)
                 rows.append(back_row())
-                await out("💰 شارژ کیف پول — بازیکن:", ik(rows))
+                await out(
+                    "💰 شارژ کیف پول" + "\n"
+                    + f"صفحه {page+1}/{pages} — کل بازیکن: {total}" + "\n"
+                    + "بازیکن را انتخاب کنید:",
+                    ik(rows),
+                )
                 return
             if data.startswith("ng:owalletsel:"):
                 tid = int(data.split(":")[-1])
+                if not game.is_owner(pid):
+                    await out("❌ فقط مالک")
+                    return
                 bal = await game.legendary.ensure_wallet(tid)
+                p = await game.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (tid,))
+                name = (p or {}).get("display_name") or (p or {}).get("username") or str(tid)
+                cc = (p or {}).get("country_code") or "—"
                 _pending[pid] = {"kind": "owner_wallet_charge", "target": tid}
                 await out(
-                    f"موجودی فعلی بازیکن {tid}: {int(bal):,} تومان\nمبلغ شارژ را بنویسید:",
+                    "💰 شارژ کیف پول" + "\n"
+                    + f"بازیکن: {name}" + "\n"
+                    + f"شناسه: {tid}" + "\n"
+                    + f"کشور: {cc}" + "\n"
+                    + f"موجودی فعلی: {int(bal):,} تومان" + "\n\n"
+                    + "مبلغ شارژ را به عدد بفرستید." + "\n"
+                    + "مثال: 2000",
                     ik([cancel_row()]),
                 )
                 return
