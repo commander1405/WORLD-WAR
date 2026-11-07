@@ -3952,18 +3952,29 @@ class Game:
             raise GameError("مجاز نیستید")
         code = await self.resolve_country_for_player(int(target_player_id))
         if not code:
-            raise GameError("این بازیکن کشور ندارد")
-        c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
+            raise GameError("این بازیکن کشور فعالی ندارد")
+        c = await self.db.fetchrow(
+            "SELECT * FROM ng_countries WHERE country_code=$1", (code,)
+        )
         if not c:
             raise GameError("کشور یافت نشد")
-        max_hp = float(c.get("max_hp") or 1000) or 1000
-        hp = max(0.0, min(max_hp, float(hp)))
+        max_hp = float(c.get("max_hp") or 1000)
+        if max_hp <= 0:
+            max_hp = 1000.0
+        hp = float(hp)
+        if hp < 0:
+            raise GameError("HP نمی‌تواند منفی باشد")
+        if hp > max_hp * 2:
+            # soft cap: allow up to 2x max for owner events, but warn
+            raise GameError(f"حداکثر مجاز برای تنظیم: {int(max_hp * 2)}")
         await self.db.execute(
-            "UPDATE ng_countries SET hp=$1 WHERE country_code=$2", (hp, code)
+            "UPDATE ng_countries SET hp=$1, is_destroyed=0 WHERE country_code=$2",
+            (hp, code),
         )
         await self.admin_log(actor, "set_hp", f"{code}={hp}/{max_hp}")
-        name = c.get("name_fa") or code
-        return f"✅ HP «{name}» روی {int(hp)} / {int(max_hp)} تنظیم شد."
+        label = await self.country_label(code)
+        return f"✅ HP «{label}» روی {int(hp)} تنظیم شد (حداکثر پایه: {int(max_hp)})."
+
 
     async def admin_set_npt(self, actor: int, code: str, member: bool) -> str:
         if not self.is_owner(actor):

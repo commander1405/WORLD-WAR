@@ -931,16 +931,28 @@ def register_handlers(bot, app_ctx: dict):
                 if kind == "owner_set_hp":
                     try:
                         raw = text.strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
-                        hp = float(raw.replace(",", "").replace("،", ""))
+                        hp = float(raw.replace(",", "").replace("،", "").replace(" ", ""))
                         tid = int(st.get("target"))
                         msg = await game.admin_set_hp(pid, tid, hp)
                         _pending.pop(pid, None)
-                        await reply(message, msg, main_kb(owner))
+                        await reply(
+                            message,
+                            msg,
+                            ik([
+                                [("👤 بازگشت به کاربر", f"ng:ou:{tid}")],
+                                [("⬅️ لیست کاربران", "ng:o:players:0")],
+                                back_row(),
+                            ]),
+                        )
                     except GameError as e:
-                        await reply(message, f"❌ {e}", ik([cancel_row()]))
+                        await reply(
+                            message,
+                            f"❌ {e}" + "\n" + "دوباره عدد HP را بفرستید یا لغو کنید.",
+                            ik([cancel_row()]),
+                        )
                     except Exception as e:
                         log.exception("owner_set_hp")
-                        await reply(message, "❌ عدد HP نامعتبر است", ik([cancel_row()]))
+                        await reply(message, "❌ عدد HP نامعتبر است. مثال: 850", ik([cancel_row()]))
                     return
 
             # ---- main menu ----
@@ -2974,6 +2986,44 @@ def register_handlers(bot, app_ctx: dict):
                 ]
                 await out("🛡 پنل مالک / سازمان ملل", ik(rows))
                 return
+            if data.startswith("ng:osethp:"):
+                if not owner:
+                    await out("❌ فقط مالک")
+                    return
+                try:
+                    tid = int(data.split(":")[-1])
+                except ValueError:
+                    await out("❌ شناسه نامعتبر")
+                    return
+                # live country for status text
+                try:
+                    code = await game.resolve_country_for_player(tid)
+                except Exception:
+                    code = None
+                cur_hp = "—"
+                max_hp = "—"
+                cname = "بدون کشور"
+                if code:
+                    c = await game.db.fetchrow(
+                        "SELECT name_fa, flag, hp, max_hp FROM ng_countries WHERE country_code=$1",
+                        (code,),
+                    )
+                    if c:
+                        cname = f"{c.get('flag') or ''} {c.get('name_fa') or code}".strip()
+                        cur_hp = int(float(c.get("hp") or 0))
+                        max_hp = int(float(c.get("max_hp") or 1000))
+                _pending[pid] = {"kind": "owner_set_hp", "target": tid}
+                await out(
+                    "❤️ تنظیم HP" + "\n"
+                    + f"بازیکن: {tid}" + "\n"
+                    + f"کشور: {cname}" + "\n"
+                    + f"HP فعلی: {cur_hp} / {max_hp}" + "\n\n"
+                    + "عدد HP جدید را بفرستید (۰ تا حداکثر)." + "\n"
+                    + "مثال: 850",
+                    ik([cancel_row()]),
+                )
+                return
+
             if data.startswith("ng:ou:"):
                 tid = int(data.split(":")[-1])
                 try:
