@@ -1263,12 +1263,14 @@ def register_handlers(bot, app_ctx: dict):
                 if not code:
                     await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
+                nav_push(pid, "diplo")
                 rows = [
+                    [("🌍 فهرست کشورها", "ng:diplo:list")],
                     [("💰 کمک مالی", "ng:trade:money"), ("📦 کمک نظامی", "ng:trade:army")],
-                    [("🕊 مدیریت صلح", "ng:peace:menu")],
+                    [("🤝 اتحادها", "ng:go:ally")],
                     back_row(),
                 ]
-                await reply(message, "🤝 روابط خارجی", ik(rows))
+                await reply(message, "🤝 روابط خارجی — کمک، دیپلماسی و کشورها", ik(rows))
                 return
 
             if text == BTN_PEACE:
@@ -1581,28 +1583,58 @@ def register_handlers(bot, app_ctx: dict):
                     await out("🏭 کارگاه — تولید و فناوری", ik(rows))
                     return
                 if key == "diplo":
+                    if not code:
+                        await out("هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.")
+                        return
                     nav_push(pid, "diplo")
                     rows = [
-                        [("کشورها", "ng:diplo:list")],
-                        [("کمک مالی", "ng:aid:money"), ("کمک نظامی", "ng:aid:army")],
+                        [("🌍 فهرست کشورها", "ng:diplo:list")],
+                        [("💰 کمک مالی", "ng:trade:money"), ("📦 کمک نظامی", "ng:trade:army")],
+                        [("🤝 اتحادها", "ng:go:ally")],
                         back_row(),
                     ]
-                    await out("🤝 روابط خارجی", ik(rows))
+                    await out("🤝 روابط خارجی — کمک، دیپلماسی و کشورها", ik(rows))
                     return
                 if key == "mkt":
                     if not code:
                         await out("هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.")
                         return
                     nav_push(pid, "mkt")
-                    await out("🌐 بازار آزاد", ik([[("📋 آگهی‌ها", "ng:mkt:0")], back_row()]))
+                    try:
+                        listings = await game.market_list(0)
+                    except Exception:
+                        listings = []
+                    rows = []
+                    for L in listings:
+                        name = game._cat.get(L["item_code"], {}).get("name_fa", L["item_code"])
+                        rows.append([(
+                            f"#{L['id']} {name} ×{int(float(L['quantity']))} | {int(float(L['unit_price'])):,}",
+                            f"ng:mbuy:{L['id']}",
+                        )])
+                    rows.append([("آگهی‌های من", "ng:mmine")])
+                    rows.append(back_row())
+                    await out("🌐 بازار آزاد جهانی", ik(rows))
                     return
                 if key == "trade":
+                    if not code:
+                        await out("هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.")
+                        return
                     nav_push(pid, "trade")
-                    await out("🚢 تجارت جهانی", ik([back_row()]))
+                    rows = [
+                        [("💰 کمک مالی", "ng:trade:money"), ("📦 کمک نظامی", "ng:trade:army")],
+                        back_row(),
+                    ]
+                    await out("🚢 تجارت و کمک بین کشورها", ik(rows))
                     return
                 if key == "treaty":
                     nav_push(pid, "treaty")
-                    await out("⚖ پیمان‌ها و توافق‌ها", ik([[("🕊 مدیریت صلح", "ng:peace:menu")], back_row()]))
+                    await out(
+                        "⚖ پیمان‌ها" + chr(10)+chr(10) + "پیمان صلح قدیمی حذف شده است." + chr(10) + "از اتحادها برای همکاری پایدار استفاده کنید.",
+                        ik([
+                            [("🤝 اتحادها", "ng:go:ally")],
+                            back_row(),
+                        ]),
+                    )
                     return
                 if key == "wallet":
                     nav_push(pid, "wallet")
@@ -1690,10 +1722,9 @@ def register_handlers(bot, app_ctx: dict):
                 if prev == "ctrl" and code:
                     rows = [
                         [("📜 تصویب قوانین", "ng:ctrl:laws")],
-                        [("🌊 کنترل تنگه‌ها", "ng:ctrl:strait")],
-                        [("✈️ کنترل پروازها", "ng:ctrl:flight")],
-                        [("🚢 کنترل دریایی", "ng:ctrl:sea")],
-                        [("🌐 کنترل اینترنت", "ng:ctrl:net")],
+                        [("🌊 کنترل تنگه‌ها", "ng:ctrl:straits")],
+                        [("✈️ پروازها", "ng:ctrl:flights"), ("🚢 دریایی", "ng:ctrl:maritime")],
+                        [("🌐 اینترنت", "ng:ctrl:net")],
                         back_row(),
                     ]
                     await out("🏛 کنترل کشور — سیاست داخلی", ik(rows))
@@ -2136,6 +2167,65 @@ def register_handlers(bot, app_ctx: dict):
                     await out(await game.market_cancel(int(data.split(":")[-1]), code))
                 except GameError as e:
                     await out(f"❌ {e}")
+                return
+
+
+            if data == "ng:diplo:list":
+                countries = await game.list_countries()
+                lines = ["🌍 وضعیت کشورها و گروهک‌ها", ""]
+                owned = [c for c in countries if c.get("owner_player_id")]
+                free = [c for c in countries if not c.get("owner_player_id")]
+                lines.append(f"🟢 دارای رهبر: {len(owned)}")
+                lines.append(f"⚪ آزاد: {len(free)}")
+                lines.append("")
+                for c in owned[:40]:
+                    et = "گروهک" if str(c.get("entity_type") or "") == "group" else "کشور"
+                    lines.append(f"{c.get('flag','')} {c.get('name_fa')} — {et} — فعال")
+                if len(owned) > 40:
+                    lines.append(f"... و {len(owned)-40} مورد دیگر")
+                await out(chr(10).join(lines), ik([
+                    [("💰 کمک مالی", "ng:trade:money"), ("📦 کمک نظامی", "ng:trade:army")],
+                    back_row(),
+                ]))
+                return
+            if data in ("ng:go:ally", "ng:ally", "ng:ally:mine", "ng:ally:list"):
+                if not code:
+                    await out("هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
+                    return
+                nav_push(pid, "ally")
+                mem = await game.alliances.member_of(code)
+                if mem and data != "ng:ally:list":
+                    a = await game.alliances.get(mem["alliance_id"])
+                    mems = await game.alliances.members(mem["alliance_id"])
+                    labels = {m["country_code"]: await game.country_label(m["country_code"]) for m in mems}
+                    text_a = game.alliances.card_text(a, mems, labels)
+                    rows = [
+                        [("👥 اعضا", f"ng:amembers:{a['id']}"), ("🏦 خزانه", f"ng:atreasure:{a['id']}")],
+                        [("🚪 خروج از اتحاد", "ng:aleave")],
+                    ]
+                    if mem.get("role") == "founder":
+                        rows.insert(1, [("⚙️ مدیریت", f"ng:amgmt:{a['id']}")])
+                        rows.insert(2, [("💸 تقسیم مساوی خزانه", "ng:asplit")])
+                    rows.append(back_row())
+                    await out(text_a, ik(rows))
+                    return
+                allies = await game.alliances.list_active()
+                rows = [[("➕ ساخت اتحاد", "ng:acreate")]]
+                for a in allies[:25]:
+                    mems = await game.alliances.members(a["id"])
+                    rows.append([(f"{a['name']} ({len(mems)}/{a['max_members']})", f"ng:aview:{a['id']}")])
+                rows.append(back_row())
+                await out("🤝 اتحادها — فهرست فعال یا ساخت اتحاد جدید:", ik(rows))
+                return
+            if data == "ng:ally:create":
+                if not code:
+                    await out("هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
+                    return
+                if await game.alliances.member_of(code):
+                    await out("شما هم‌اکنون عضو یک اتحاد هستید.", main_kb(owner))
+                    return
+                _pending[pid] = {"kind": "ally_name"}
+                await out("🏗 ساخت اتحاد" + chr(10)+chr(10) + "نام اتحاد را بنویسید (حداقل ۳ حرف):", ik([cancel_row()]))
                 return
 
             # trade / aid
@@ -4016,6 +4106,18 @@ def register_handlers(bot, app_ctx: dict):
                 except GameError as e:
                     await out(f"❌ {e}")
                 return
+
+            # Fallback: never fail silently
+            log.warning("unhandled callback data=%s pid=%s", (data or "")[:80], pid)
+            try:
+                await out(
+                    "این دکمه پیدا نشد یا منقضی شده است."
+                    + chr(10)
+                    + "از منوی اصلی دوباره وارد شوید.",
+                    ik([back_row(), [("🏠 خانه", "ng:home")]]),
+                )
+            except Exception:
+                pass
 
         except Exception:
             log.exception("on_callback")
