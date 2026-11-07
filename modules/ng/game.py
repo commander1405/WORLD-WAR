@@ -1312,6 +1312,8 @@ class Game:
         return total, units
 
     async def can_attack(self, code: str, kind: str | None = None) -> tuple[bool, str]:
+        if self.is_un_country(code):
+            return True, ""
         try:
             await self.legendary.assert_can_attack(code)
         except LegendaryError as e:
@@ -1341,23 +1343,25 @@ class Game:
         return True, ""
 
     async def attack(self, attacker: str, defender: str, kind: str, percent: float, pid: int) -> str:
+        un_atk = self.is_un_force(attacker, pid)
         meta = await self.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
-        if meta and int(meta.get("war_enabled") or 0) != 1:
+        if not un_atk and meta and int(meta.get("war_enabled") or 0) != 1:
             raise GameError("جنگ توسط سازمان ملل بسته شده است.")
-        if await self.at_peace(attacker, defender):
+        if not un_atk and await self.at_peace(attacker, defender):
             raise GameError("پیمان صلح فعال است؛ حمله ممکن نیست.")
-        try:
-            await self.legendary.assert_can_attack(attacker)
-        except LegendaryError as e:
-            raise GameError(str(e)) from e
-        if await self.legendary.is_immune(defender):
+        if not un_atk:
+            try:
+                await self.legendary.assert_can_attack(attacker)
+            except LegendaryError as e:
+                raise GameError(str(e)) from e
+        if not un_atk and await self.legendary.is_immune(defender):
             raise GameError("کشور هدف مصونیت دارد؛ حمله بی‌اثر است.")
         if attacker == defender:
             raise GameError("نامعتبر")
         if kind not in ("ground", "air", "sea"):
             raise GameError("نوع درگیری نامعتبر است.")
         percent = max(10, min(100, float(percent)))
-        test_atk = await self.is_test_active_for_country(attacker)
+        test_atk = await self.is_test_active_for_country(attacker) or un_atk
         cover = 0.0
         intercepted = 0.0
 
@@ -1432,7 +1436,13 @@ class Game:
                 units.append((ic, q, eng, ctype))
 
             combat_units = [u for u in units if u[3] != "specialist"]
-            if not combat_units or total_power <= 0:
+            if (not combat_units or total_power <= 0) and un_atk:
+                # سازمان ملل بدون نیاز به موجودی نیرو حمله می‌کند
+                total_power = 5000.0 * (percent / 100.0)
+                combat_units = []  # no inventory consumption
+            if not combat_units and not un_atk:
+                raise GameError("نیروی نظامی قابل‌استفاده برای این نوع حمله ندارید.")
+            if total_power <= 0 and not un_atk:
                 raise GameError("نیروی نظامی قابل‌استفاده برای این نوع حمله ندارید.")
 
             engaged_power = total_power
@@ -1770,6 +1780,18 @@ class Game:
     # ---------- admin ----------
     def is_owner(self, pid: int) -> bool:
         return self.owner_id and int(pid) == int(self.owner_id)
+
+    def is_un_country(self, code: str | None) -> bool:
+        return (code or "").upper() == UN_CODE
+
+    def is_un_force(self, code: str | None, pid: int | None = None) -> bool:
+        """سازمان ملل (مالک) همیشه مجاز به عملیات نظامی/اتمی است."""
+        if not self.is_un_country(code):
+            return False
+        if pid is None:
+            return True
+        return self.is_owner(int(pid))
+
 
     async def ban(self, actor: int, target: int, reason: str = "") -> str:
         if not self.is_owner(actor):
@@ -3448,24 +3470,26 @@ class Game:
         )
 
     async def attack_nuclear(self, attacker: str, defender: str, pid: int) -> str:
-        try:
-            await self.legendary.assert_can_nuke(attacker)
-            await self.legendary.assert_can_attack(attacker)
-        except LegendaryError as e:
-            raise GameError(str(e)) from e
-        if await self.legendary.is_immune(defender):
-            raise GameError("کشور هدف مصونیت دارد؛ حمله اتمی بی‌اثر است.")
+        un_atk = self.is_un_force(attacker, pid)
+        if not un_atk:
+            try:
+                await self.legendary.assert_can_nuke(attacker)
+                await self.legendary.assert_can_attack(attacker)
+            except LegendaryError as e:
+                raise GameError(str(e)) from e
+            if await self.legendary.is_immune(defender):
+                raise GameError("کشور هدف مصونیت دارد؛ حمله اتمی بی‌اثر است.")
         """Abstract nuclear strike: consumes 1 bomb, deals 25-35% max_hp damage."""
         meta = await self.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
-        if meta and int(meta.get("war_enabled") or 0) != 1:
+        if not un_atk and meta and int(meta.get("war_enabled") or 0) != 1:
             raise GameError("جنگ توسط سازمان ملل بسته شده است.")
-        if meta and int(meta.get("nuclear_enabled") or 0) != 1:
+        if not un_atk and meta and int(meta.get("nuclear_enabled") or 0) != 1:
             raise GameError("قابلیت هسته‌ای بازی توسط سازمان ملل غیرفعال است. از /panel آن را فعال کنید.")
         if await self.at_peace(attacker, defender):
             raise GameError("پیمان صلح فعال است؛ حمله ممکن نیست.")
         if attacker == defender:
             raise GameError("نامعتبر")
-        test_atk = await self.is_test_active_for_country(attacker)
+        test_atk = await self.is_test_active_for_country(attacker) or un_atk
         async with self.db.transaction() as tx:
             a = await tx.fetchrow(
                 "SELECT * FROM ng_countries WHERE country_code=$1 AND owner_player_id=$2",
@@ -3496,12 +3520,13 @@ class Game:
                 (attacker,),
             )
             bq = float(bomb["quantity"]) if bomb else 0.0
-            if bq < 1:
+            if bq < 1 and not un_atk:
                 raise GameError("بمب اتم در انبار ندارید.")
-            await tx.execute(
-                "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='item_atom_bomb'",
-                (bq - 1, attacker),
-            )
+            if bq >= 1:
+                await tx.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='item_atom_bomb'",
+                    (bq - 1, attacker),
+                )
             pct = random.uniform(0.25, 0.35)
             damage = float(d["max_hp"]) * pct
             cover, _ = await self.defense_coverage(defender, "nuclear")
