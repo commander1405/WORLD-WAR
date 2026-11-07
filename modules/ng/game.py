@@ -362,13 +362,52 @@ class Game:
         return bool(row) and str(row.get("entity_type") or "country") == "group"
 
     async def list_countries(self, *, for_owner: bool = False, include_un: bool = False) -> list[dict]:
-
+        # heal inconsistent rows: owned but marked destroyed
+        try:
+            await self.db.execute(
+                """
+                UPDATE ng_countries
+                SET is_destroyed=0
+                WHERE owner_player_id IS NOT NULL AND COALESCE(is_destroyed,0)=1
+                """
+            )
+        except Exception:
+            pass
         rows = await self.db.fetch(
-            "SELECT * FROM ng_countries WHERE is_destroyed=0 ORDER BY name_fa"
+            "SELECT * FROM ng_countries WHERE COALESCE(is_destroyed,0)=0 ORDER BY name_fa"
         )
         if for_owner or include_un:
             return rows
         return [r for r in rows if r.get("country_code") != UN_CODE]
+
+    async def list_attack_targets(self, attacker_code: str | None, page: int = 0, page_size: int = 25) -> tuple[list[dict], int]:
+        """All currently owned, living countries except attacker — always live from DB."""
+        try:
+            await self.db.execute(
+                """
+                UPDATE ng_countries
+                SET is_destroyed=0
+                WHERE owner_player_id IS NOT NULL AND COALESCE(is_destroyed,0)=1
+                """
+            )
+        except Exception:
+            pass
+        rows = await self.db.fetch(
+            """
+            SELECT * FROM ng_countries
+            WHERE owner_player_id IS NOT NULL
+              AND COALESCE(is_destroyed,0)=0
+              AND country_code <> $1
+              AND country_code <> $2
+            ORDER BY name_fa
+            """,
+            (attacker_code or "", UN_CODE),
+        )
+        total = len(rows)
+        page = max(0, int(page))
+        page_size = max(5, min(40, int(page_size)))
+        start = page * page_size
+        return rows[start:start + page_size], total
 
     async def claim(self, pid: int, code: str) -> dict:
         await self.assert_not_banned(pid)
@@ -1588,7 +1627,7 @@ class Game:
                             (attacker, r["item_code"], half),
                         )
                 await tx.execute(
-                    "UPDATE ng_countries SET treasury=$1, owner_player_id=NULL, is_destroyed=1 WHERE country_code=$2",
+                    "UPDATE ng_countries SET treasury=$1, owner_player_id=NULL, is_destroyed=0, claimed_at=NULL, hp=1000 WHERE country_code=$2",
                     (float(d_row["treasury"]) - half_money, defender),
                 )
                 await tx.execute(
@@ -3487,7 +3526,7 @@ class Game:
             if destroyed:
                 prev = d.get("owner_player_id")
                 await tx.execute(
-                    "UPDATE ng_countries SET owner_player_id=NULL, is_destroyed=1 WHERE country_code=$1",
+                    "UPDATE ng_countries SET owner_player_id=NULL, is_destroyed=0, claimed_at=NULL, hp=1000 WHERE country_code=$1",
                     (defender,),
                 )
                 if prev:

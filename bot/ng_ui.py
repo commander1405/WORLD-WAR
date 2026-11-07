@@ -1884,7 +1884,7 @@ def register_handlers(bot, app_ctx: dict):
                     c for c in await game.list_countries()
                     if c.get("owner_player_id") and c["country_code"] != code
                 ]
-                rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:leggo:{code_i}:{c['country_code']}")] for c in countries[:30]]
+                rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:leggo:{code_i}:{c['country_code']}")] for c in countries]
                 rows.append(back_row())
                 await out(f"{d['name_fa']}\n{d['power_fa']}\n\nهدف را انتخاب کنید:", ik(rows))
                 return
@@ -2129,12 +2129,12 @@ def register_handlers(bot, app_ctx: dict):
                     if c.get("owner_player_id") and c["country_code"] != code
                 ]
                 if action == "hackdef":
-                    rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:chdef:{c['country_code']}")] for c in countries[:30]]
+                    rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:chdef:{c['country_code']}")] for c in countries]
                     rows.append(back_row())
                     await out("هدف هکر پدافند را انتخاب کنید:", ik(rows))
                     return
                 if action == "hackasset":
-                    rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:chasset:{c['country_code']}")] for c in countries[:30]]
+                    rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:chasset:{c['country_code']}")] for c in countries]
                     rows.append(back_row())
                     await out("هدف هکر دارایی را انتخاب کنید:", ik(rows))
                     return
@@ -2181,14 +2181,37 @@ def register_handlers(bot, app_ctx: dict):
                         "⚠️ امکان انجام حمله وجود ندارد.\n\nدر حال حاضر وضعیت جنگ در جهان بسته است.\nسازمان ملل باید جنگ را فعال کند."
                     )
                     return
-            if data == "ng:atkmenu":
+            if data == "ng:atkmenu" or data.startswith("ng:atkmenu:"):
                 if not code:
                     await out("کشور ندارید")
                     return
-                countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
-                rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:atk:{c['country_code']}")] for c in countries[:30]]
+                page = 0
+                if data.startswith("ng:atkmenu:"):
+                    try:
+                        page = int(data.split(":")[-1])
+                    except ValueError:
+                        page = 0
+                countries, total = await game.list_attack_targets(code, page=page, page_size=25)
+                pages = max(1, (total + 24) // 25)
+                rows = []
+                for c in countries:
+                    rows.append([(
+                        f"{c.get('flag','')} {c['name_fa']}",
+                        f"ng:atk:{c['country_code']}",
+                    )])
+                nav = []
+                if page > 0:
+                    nav.append(("⬅️ قبلی", f"ng:atkmenu:{page-1}"))
+                if (page + 1) * 25 < total:
+                    nav.append(("بعدی ➡️", f"ng:atkmenu:{page+1}"))
+                if nav:
+                    rows.append(nav)
                 rows.append(back_row())
-                await out("هدف حمله را انتخاب کنید:", ik(rows))
+                await out(
+                    "هدف حمله را انتخاب کنید:" + "\n"
+                    + f"تعداد اهداف زنده: {total} — صفحه {page+1}/{pages}",
+                    ik(rows) if rows else main_kb(owner),
+                )
                 return
             if data.startswith("ng:atk:"):
                 if not code:
@@ -3133,7 +3156,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:ocondemn":
                 countries = [c for c in await game.list_countries(for_owner=True) if c.get("country_code") != "UN"]
-                rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:ocondemn:{c['country_code']}")] for c in countries[:30]]
+                rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:ocondemn:{c['country_code']}")] for c in countries]
                 rows.append(back_row())
                 await out("کشور هدف محکومیت را انتخاب کنید:", ik(rows))
                 return

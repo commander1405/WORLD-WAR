@@ -506,16 +506,41 @@ class AllianceService:
         return f"✅ اتحاد «{a['name']}» منحل شد. موجودی خزانه به بنیان‌گذار برگشت."
 
     async def on_country_destroyed(self, country: str) -> None:
-        m = await self.member_of(country)
-        if not m:
+        """Remove country from any alliance; dissolve if it was founder."""
+        country = (country or "").upper()
+        if not country:
             return
-        if m["role"] == "founder":
-            await self.dissolve(int(m["player_id"]), int(m["alliance_id"]), is_owner=False)
-        else:
+        m = await self.member_of(country)
+        if m:
+            try:
+                if str(m.get("role") or "") == "founder":
+                    try:
+                        await self.dissolve(int(m["player_id"]), int(m["alliance_id"]), is_owner=False)
+                    except Exception:
+                        # force dissolve residual
+                        aid = int(m["alliance_id"])
+                        now = datetime.now(timezone.utc).isoformat()
+                        await self.db.execute(
+                            "UPDATE ng_alliances SET status='dissolved', treasury=0, dissolved_at=$1 WHERE id=$2",
+                            (now, aid),
+                        )
+                        await self.db.execute(
+                            "DELETE FROM ng_alliance_members WHERE alliance_id=$1", (aid,)
+                        )
+                else:
+                    await self.db.execute(
+                        "DELETE FROM ng_alliance_members WHERE alliance_id=$1 AND country_code=$2",
+                        (m["alliance_id"], country),
+                    )
+            except Exception:
+                pass
+        # residual membership rows for this country (any alliance)
+        try:
             await self.db.execute(
-                "DELETE FROM ng_alliance_members WHERE alliance_id=$1 AND country_code=$2",
-                (m["alliance_id"], country),
+                "DELETE FROM ng_alliance_members WHERE country_code=$1", (country,)
             )
+        except Exception:
+            pass
 
     async def check_betrayal_on_attack(self, attacker_pid: int, attacker_code: str, defender_code: str) -> str | None:
         fl = await self.db.fetchrow(
