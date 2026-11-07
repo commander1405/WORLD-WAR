@@ -1294,15 +1294,36 @@ class Game:
         return text
 
     async def cyber_status_text(self, code: str) -> str:
+        """Defense in inventory is always auto-active — no manual toggle."""
         dis = await self.active_cyber_disable_ratio(code)
-        cov, meta = await self.defense_coverage(code, "air")
+        cov_air, meta_air = await self.defense_coverage(code, "air")
+        cov_g, _ = await self.defense_coverage(code, "ground")
+        cov_s, _ = await self.defense_coverage(code, "sea")
+        systems = await self.list_defense_systems(code)
         lines = [
-            "💻 وضعیت پدافند و سایبری",
-            f"قدرت پدافند خام: {meta['defense_power']:.0f}",
-            f"پوشش هوایی مؤثر: {cov*100:.1f}% (سقف {self.DEFENSE_COVER_CAP*100:.0f}%)",
+            "🛡 وضعیت پدافند",
+            "",
+            "✅ هر پدافندی که در انبار باشد خودکار فعال است.",
+            "نیازی به روشن/فعال‌کردن دستی نیست.",
+            "",
+            f"قدرت پدافند: {meta_air['defense_power']:.0f}",
+            f"پوشش هوایی: {cov_air*100:.0f}٪",
+            f"پوشش زمینی: {cov_g*100:.0f}٪",
+            f"پوشش دریایی: {cov_s*100:.0f}٪",
+            f"(سقف پوشش: {self.DEFENSE_COVER_CAP*100:.0f}٪)",
+            "",
+            "سامانه‌های فعال از انبار:",
         ]
+        if systems:
+            for s in systems[:15]:
+                lines.append(
+                    f"• {s['name']} × {int(s['qty'])} — قدرت {int(s['defense'])} — وضعیت: فعال ✅"
+                )
+        else:
+            lines.append("• پدافندی در انبار نیست. از فروشگاه بخرید تا خودکار فعال شود.")
         if dis > 0:
-            lines.append(f"⚠ اختلال سایبری فعال: {dis*100:.0f}% ظرفیت پدافند موقتاً از کار افتاده")
+            lines.append("")
+            lines.append(f"⚠ اختلال سایبری فعال: {dis*100:.0f}٪ ظرفیت موقتاً از کار افتاده")
             rows = await self.db.fetch(
                 "SELECT * FROM ng_cyber_effects WHERE target_country=$1 AND effect_type='def_disable' ORDER BY ends_at DESC",
                 (code,),
@@ -1319,9 +1340,9 @@ class Game:
                 except Exception:
                     pass
         else:
+            lines.append("")
             lines.append("اختلال سایبری فعال نیست.")
-        return "\n".join(lines)
-
+        return chr(10).join(lines)
 
     async def available_force(self, code: str, kind: str) -> tuple[float, list]:
         """Return (total attack power, units) using independent item damage stats."""
@@ -1739,7 +1760,7 @@ class Game:
         for s in systems[:8]:
             sys_lines.append(f"• {s.get('name')}: {int(s.get('qty') or 0)} واحد (قدرت {int(s.get('defense') or 0)})")
         if not sys_lines:
-            sys_lines = ["• بدون پدافند فعال"]
+            sys_lines = ["• پدافندی در انبار مدافع نیست"]
 
         report_lines = [
             "⚔️ گزارش درگیری",
