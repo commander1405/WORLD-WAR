@@ -2741,7 +2741,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("📋 قوانین فعال من", "ng:lawmine")],
                     back_row(),
                 ]
-                await out("📜 تصویب قوانین\nهر کشور حداکثر ۳ قانون در روز می‌تواند ثبت کند.", ik(rows))
+                await out("📜 تصویب قوانین\nهر کشور حداکثر ۳ قانون در روز. با ثبت هر قانون ۵٬۰۰۰٬۰۰۰ به خزانه اضافه می‌شود (جدا از درآمد روزانه).", ik(rows))
                 return
             if data == "ng:lawnew":
                 _pending[pid] = {"kind": "law_title"}
