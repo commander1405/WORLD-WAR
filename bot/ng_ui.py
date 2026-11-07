@@ -1423,6 +1423,12 @@ def register_handlers(bot, app_ctx: dict):
             if not pid or not data:
                 return
             try:
+                if hasattr(cq, "answer"):
+                    await cq.answer(text="⏳", show_alert=False)
+            except Exception:
+                pass
+            log.info("callback data=%s pid=%s", data[:64], pid)
+            try:
                 await ensure(pid)
             except GameError as e:
                 msg = getattr(cq, "message", None)
@@ -2801,6 +2807,71 @@ def register_handlers(bot, app_ctx: dict):
             if data == "ng:o:world":
                 await out(await game.world_status_text(for_owner=owner))
                 return
+
+            if data.startswith("ng:dcd:"):
+                try:
+                    tid = int(str(data).split(":")[-1])
+                except Exception:
+                    await out("❌ شناسه نامعتبر")
+                    return
+                try:
+                    msg = await game.clear_destroy_cooldown(pid, tid)
+                    log.info("dcd cleared by=%s target=%s", pid, tid)
+                    await out(msg, ik([[("👤 بازگشت به کاربر", f"ng:ou:{tid}")], [("🏠 خانه", "ng:home")]]))
+                except GameError as e:
+                    await out(f"❌ {e}", ik([[("👤 بازگشت", f"ng:ou:{tid}")]]))
+                except Exception as e:
+                    log.exception("ng:dcd")
+                    await out(f"❌ خطا در رفع محدودیت: {e}")
+                return
+
+            if data.startswith("ng:orec:") and not data.startswith("ng:orecgo:"):
+                try:
+                    tid = int(str(data).split(":")[-1])
+                except Exception:
+                    await out("❌ شناسه نامعتبر")
+                    return
+                try:
+                    snap = await game.db.fetchrow(
+                        "SELECT * FROM ng_destroy_snapshots WHERE player_id=$1 AND recovered=0 ORDER BY id DESC LIMIT 1",
+                        (tid,),
+                    )
+                    if not snap:
+                        await out("❌ اسنپ‌شات نابودی نیست. ریکاوری فقط تا ۳ ساعت بعد از نابودی ممکن است.", ik([[("👤 بازگشت", f"ng:ou:{tid}")]]))
+                        return
+                    cname = await game.country_label(snap["country_code"])
+                    hp_half = int(float(snap.get("max_hp") or 1000) / 2)
+                    treas = int(float(snap.get("treasury") or 0))
+                    body = (
+                        "♻️ ریکاوری ۳ ساعته\n\n"
+                        f"بازیکن: {tid}\n"
+                        f"کشور: {cname}\n"
+                        f"خزانه: {treas:,}\n"
+                        f"HP بعد از ریکاوری: {hp_half}\n"
+                        f"زمان نابودی: {snap.get('destroyed_at')}"
+                    )
+                    await out(body, ik([[("✅ تأیید ریکاوری", f"ng:orecgo:{tid}"), ("❌ انصراف", f"ng:ou:{tid}")]]))
+                except Exception as e:
+                    log.exception("ng:orec")
+                    await out(f"❌ خطا: {e}")
+                return
+
+            if data.startswith("ng:orecgo:"):
+                try:
+                    tid = int(str(data).split(":")[-1])
+                except Exception:
+                    await out("❌ شناسه نامعتبر")
+                    return
+                try:
+                    msg = await game.recover_destroyed_player(pid, tid)
+                    await out(msg, ik([[("👤 بازگشت", f"ng:ou:{tid}")], [("🏠 خانه", "ng:home")]]))
+                except GameError as e:
+                    await out(f"❌ {e}", ik([[("👤 بازگشت", f"ng:ou:{tid}")]]))
+                except Exception as e:
+                    log.exception("ng:orecgo")
+                    await out(f"❌ خطا در ریکاوری: {e}")
+                return
+
             if data.startswith("ng:ocd:"):
                 try:
                     sec = int(data.split(":")[-1])
@@ -3345,93 +3416,14 @@ def register_handlers(bot, app_ctx: dict):
                     [("💵 دادن پول", f"ng:ougive:{tid}"), ("💸 گرفتن پول", f"ng:outake:{tid}")],
                     [("🧾 مالیات از کاربر", f"ng:outax:{tid}")],
                     [("🧬 جان ×۲ روشن", f"ng:oudblon:{tid}"), ("🧬 جان ×۲ خاموش", f"ng:oudbloff:{tid}")],
-                    [("⏱ رفع محدودیت ۳۰دقیقه", f"ng:oucdclear:{tid}")],
-                    [("♻️ ریکاوری ۳ ساعته", f"ng:ourecover:{tid}")],
+                    [("⏱ رفع محدودیت ۳۰دقیقه", f"ng:dcd:{tid}")],
+                    [("♻️ ریکاوری ۳ ساعته", f"ng:orec:{tid}")],
                     [("♻️ ریست کردن کاربر", f"ng:oureset:{tid}")],
                     [("⬅️ لیست کاربران", "ng:o:players:0")],
                 ]
                 await out(card, ik(rows))
                 return
 
-            if data.startswith("ng:oucdclear:"):
-                try:
-                    tid = int(data.split(":")[-1])
-                except Exception:
-                    await out("❌ شناسه نامعتبر")
-                    return
-                try:
-                    msg = await game.clear_destroy_cooldown(pid, tid)
-                    await out(msg)
-                except GameError as e:
-                    await out(f"❌ {e}")
-                except Exception as e:
-                    log.exception("oucdclear")
-                    await out(f"❌ خطا در رفع محدودیت: {e}")
-                return
-
-            if data.startswith("ng:ourecover:"):
-                try:
-                    tid = int(data.split(":")[-1])
-                except Exception:
-                    await out("❌ شناسه نامعتبر")
-                    return
-                try:
-                    p = await game.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (tid,))
-                    if not p:
-                        await out("❌ بازیکن یافت نشد")
-                        return
-                    snap = await game.db.fetchrow(
-                        """
-                        SELECT * FROM ng_destroy_snapshots
-                        WHERE player_id=$1 AND recovered=0
-                        ORDER BY id DESC LIMIT 1
-                        """,
-                        (tid,),
-                    )
-                    if not snap:
-                        await out(
-                            "❌ اسنپ‌شات نابودی برای این بازیکن نیست.\n"
-                            "ریکاوری فقط تا ۳ ساعت بعد از نابودی (پس از آپدیت ریکاوری) ممکن است."
-                        )
-                        return
-                    cname = await game.country_label(snap["country_code"])
-                    rows = [
-                        [("✅ تأیید ریکاوری", f"ng:ourecovergo:{tid}"), ("❌ انصراف", f"ng:ou:{tid}")],
-                    ]
-                    await out(
-                        "♻️ ریکاوری ۳ ساعته\n\n"
-                        f"بازیکن: {tid}\n"
-                        f"کشور: {cname}\n"
-                        f"خزانه ذخیره‌شده: {int(float(snap.get('treasury') or 0)):,}\n"
-                        f"حداکثر HP: {int(float(snap.get('max_hp') or 1000))}\n"
-                        f"HP بعد از ریکاوری: {int(float(snap.get('max_hp') or 1000) / 2)}\n"
-                        f"زمان نابودی: {snap.get('destroyed_at')}\n\n"
-                        "کشور + پول باقی‌مانده + آیتم‌های باقی‌مانده برمی‌گردد.\n"
-                        "جان نصف می‌شود. محدودیت ۳۰ دقیقه هم برداشته می‌شود.",
-                        ik(rows),
-                    )
-                except GameError as e:
-                    await out(f"❌ {e}")
-                except Exception as e:
-                    log.exception("ourecover")
-                    await out(f"❌ خطا در نمایش ریکاوری: {e}")
-                return
-
-            if data.startswith("ng:ourecovergo:"):
-                try:
-                    tid = int(data.split(":")[-1])
-                except Exception:
-                    await out("❌ شناسه نامعتبر")
-                    return
-                try:
-                    msg = await game.recover_destroyed_player(pid, tid)
-                    await out(msg)
-                except GameError as e:
-                    await out(f"❌ {e}")
-                except Exception as e:
-                    log.exception("ourecovergo")
-                    await out(f"❌ خطا در ریکاوری: {e}")
-                return
 
             if data.startswith("ng:oureset:"):
                 tid = int(data.split(":")[-1])

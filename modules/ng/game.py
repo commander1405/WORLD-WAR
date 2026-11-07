@@ -4618,23 +4618,39 @@ class Game:
 
     async def clear_destroy_cooldown(self, actor: int, target_id: int) -> str:
         """Owner removes the 30-minute post-destroy claim restriction."""
-        if not self.is_owner(actor):
-            raise GameError("فقط مالک")
-        p = await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (int(target_id),))
+        if not self.is_owner(int(actor)):
+            raise GameError("فقط مالک مجاز است")
+        target_id = int(target_id)
+        p = await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (target_id,))
         if not p:
-            raise GameError("بازیکن یافت نشد")
-        cd = p.get("destroy_cooldown_until")
-        if not cd:
-            return f"بازیکن {target_id} محدودیت نابودی فعال ندارد."
-        await self.db.execute(
-            "UPDATE ng_players SET destroy_cooldown_until=NULL WHERE player_id=$1",
-            (int(target_id),),
-        )
-        await self.admin_log(actor, "clear_destroy_cd", f"target={target_id} was={cd}")
+            raise GameError(f"بازیکن {target_id} در جدول بازیکنان نیست")
+        try:
+            cd = p.get("destroy_cooldown_until")
+        except Exception:
+            cd = p["destroy_cooldown_until"] if p else None
+        try:
+            await self.db.execute(
+                "UPDATE ng_players SET destroy_cooldown_until=NULL WHERE player_id=$1",
+                (target_id,),
+            )
+        except Exception as e:
+            log.exception("clear_destroy_cooldown SQL")
+            raise GameError(f"خطای دیتابیس: {e}")
+        try:
+            await self.admin_log(int(actor), "clear_destroy_cd", f"target={target_id} was={cd}")
+        except Exception:
+            log.exception("admin_log clear_destroy_cd")
+        if cd in (None, "", 0, "None"):
+            return (
+                f"✅ برای بازیکن {target_id} محدودیت فعال ثبت نشده بود." + "\n"
+                + "مقدار دوباره NULL شد. الان می‌تواند کشور انتخاب کند."
+            )
         return (
-            f"✅ محدودیت ۳۰ دقیقه نابودی برای بازیکن {target_id} برداشته شد.\n"
-            "اکنون می‌تواند کشور جدید انتخاب کند."
+            f"✅ محدودیت ۳۰ دقیقه برای بازیکن {target_id} برداشته شد." + "\n"
+            + f"مقدار قبلی: {cd}" + "\n"
+            + "الان می‌تواند کشور جدید انتخاب کند."
         )
+
 
     async def recover_destroyed_player(self, actor: int, target_id: int) -> str:
         """Within 3 hours of destroy: restore same country + remaining assets, HP at half max."""
