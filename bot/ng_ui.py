@@ -1153,14 +1153,22 @@ def register_handlers(bot, app_ctx: dict):
                     return
                 meta = await game.db.fetchrow("SELECT war_enabled FROM world_meta WHERE id=1")
                 war_on = bool(meta and int(meta.get("war_enabled") or 0))
+                # سازمان ملل (مالک) همیشه منوی نظامی کامل دارد؛ بازیکنان فقط وقتی جنگ باز است
+                is_un = (str(code).upper() == "UN") and bool(owner)
+                combat_on = war_on or is_un
                 rows = []
-                if war_on:
+                if combat_on:
                     rows.append([("⚔️ حمله نظامی", "ng:atkmenu")])
                     rows.append([("💻 هک و امنیت", "ng:cyber")])
                     rows.append([("🛡 وضعیت پدافند من", "ng:mydef")])
                 rows.append([("🎁 استفاده از آیتم لجندری", "ng:leguse")])
                 rows.append(back_row())
-                if war_on:
+                if is_un and not war_on:
+                    head = (
+                        "🇺🇳 سازمان ملل — دسترسی ویژه" + "\n"
+                        + "جنگ جهان برای بازیکنان بسته است، ولی شما می‌توانید حمله/هک کنید."
+                    )
+                elif war_on:
                     head = "⚔️ عملیات نظامی و سایبری:"
                 else:
                     head = (
@@ -1170,6 +1178,7 @@ def register_handlers(bot, app_ctx: dict):
                     )
                 await reply(message, head, ik(rows))
                 return
+
             if text == BTN_STMT:
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
