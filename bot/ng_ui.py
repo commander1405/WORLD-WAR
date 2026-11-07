@@ -446,6 +446,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("💵 پول همگانی", "ng:ogiveall"), ("💰 پرداخت درآمد روزانه", "ng:odaily")],
                     [("جنگ باز", "ng:owar:1"), ("جنگ بسته", "ng:owar:0")],
                     [("هسته‌ای فعال", "ng:onuke:1"), ("هسته‌ای خاموش", "ng:onuke:0")],
+                    [("⏱ کول‌داون ۲د", "ng:ocd:120"), ("⏱ کول‌داون ۵د", "ng:ocd:300")],
                     [("بیانیه‌ها", "ng:ostmt"), ("درخواست‌های NPT", "ng:onpt")],
                     [("📜 قوانین در انتظار", "ng:olaws")],
                     [("🔕 در دسترس نیستم", "ng:oaway")],
@@ -2514,6 +2515,13 @@ def register_handlers(bot, app_ctx: dict):
 
             if data == "ng:o:world":
                 await out(await game.world_status_text(for_owner=owner))
+                return
+            if data.startswith("ng:ocd:"):
+                try:
+                    sec = int(data.split(":")[-1])
+                    await out(await game.set_attack_cooldown_sec(pid, sec))
+                except Exception as e:
+                    await out(f"❌ {e}")
                 return
             if data.startswith("ng:owar:"):
                 await out(await game.set_war(pid, data.endswith(":1")))

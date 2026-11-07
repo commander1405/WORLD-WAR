@@ -990,7 +990,28 @@ class Game:
         return False
 
     # ---------- war ----------
-    ATTACK_COOLDOWN_SEC = 300
+    ATTACK_COOLDOWN_SEC = 120  # 2 minutes for all except UN
+
+    async def attack_cooldown_sec(self) -> int:
+        """Player attack cooldown; UN bypasses separately. Owner can override via setting."""
+        try:
+            row = await self.db.fetchrow(
+                "SELECT value FROM ng_bot_settings WHERE key=$1", ("attack_cooldown_sec",)
+            )
+            if row and str(row.get("value") or "").strip().isdigit():
+                return max(0, min(3600, int(row["value"])))
+        except Exception:
+            pass
+        return int(getattr(self, "ATTACK_COOLDOWN_SEC", 120) or 120)
+
+    async def set_attack_cooldown_sec(self, actor: int, seconds: int) -> str:
+        if not self.is_owner(actor):
+            raise GameError("فقط مالک")
+        seconds = max(0, min(3600, int(seconds)))
+        await self._write_setting_raw("attack_cooldown_sec", str(seconds))
+        await self.admin_log(actor, "attack_cooldown", str(seconds))
+        return f"✅ کول‌داون حمله بازیکنان: {seconds} ثانیه ({seconds/60:.1f} دقیقه). سازمان ملل بدون کول‌داون است."
+
     BASE_DAILY_GRANT = 20_000_000  # fixed daily grant per owned country (Tehran day)
     REF_INVITEE_REWARD = 2_000_000
     REF_REFERRER_REWARD = 15_000_000
@@ -1335,8 +1356,8 @@ class Game:
                 if last.tzinfo is None:
                     last = last.replace(tzinfo=timezone.utc)
                 elapsed = (datetime.now(timezone.utc) - last).total_seconds()
-                if elapsed < self.ATTACK_COOLDOWN_SEC:
-                    left = int(self.ATTACK_COOLDOWN_SEC - elapsed)
+                if elapsed < await self.attack_cooldown_sec():
+                    left = int(await self.attack_cooldown_sec() - elapsed)
                     return False, f"هنوز در محدودیت حمله هستید. {left} ثانیه صبر کنید."
             except Exception:
                 pass
@@ -1385,8 +1406,8 @@ class Game:
                     if last.tzinfo is None:
                         last = last.replace(tzinfo=timezone.utc)
                     elapsed = (now - last).total_seconds()
-                    if elapsed < self.ATTACK_COOLDOWN_SEC:
-                        left = int(self.ATTACK_COOLDOWN_SEC - elapsed)
+                    if elapsed < await self.attack_cooldown_sec():
+                        left = int(await self.attack_cooldown_sec() - elapsed)
                         raise GameError(f"محدودیت حمله: {left} ثانیه باقی مانده است.")
                 except GameError:
                     raise
@@ -3509,8 +3530,8 @@ class Game:
                     if last.tzinfo is None:
                         last = last.replace(tzinfo=timezone.utc)
                     elapsed = (now - last).total_seconds()
-                    if elapsed < self.ATTACK_COOLDOWN_SEC:
-                        raise GameError(f"محدودیت حمله: {int(self.ATTACK_COOLDOWN_SEC - elapsed)} ثانیه.")
+                    if elapsed < await self.attack_cooldown_sec():
+                        raise GameError(f"محدودیت حمله: {int(await self.attack_cooldown_sec() - elapsed)} ثانیه.")
                 except GameError:
                     raise
                 except Exception:
