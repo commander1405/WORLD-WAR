@@ -61,12 +61,18 @@ def missile_matches_kind(code: str, kind: str) -> bool:
     return False
 
 
-def engage_quantity(qty: float, percent: float) -> float:
-    """Units committed this operation (percent of stock)."""
+def engage_quantity(qty: float, percent: float, *, item_code: str | None = None) -> float:
+    """Units committed this operation (percent of stock). Missiles = whole units only."""
     ratio = max(0.0, min(1.0, percent / 100.0))
     use = qty * ratio
     if use <= 0:
         return 0.0
+    # missiles / expendable one-shot: whole numbers only
+    cat = str((_CAT.get(item_code) or {}).get("category") or "") if item_code else ""
+    ctype = consumption_type(item_code) if item_code else ""
+    if cat == "missile" or ctype == "expendable" or (item_code and str(item_code).startswith("m_")):
+        use = max(1.0, float(math.floor(use + 1e-9))) if qty >= 1 else 0.0
+        return min(qty, use)
     # at least 1 unit if stock >= 1 and percent >= 10
     if qty >= 1 and use < 1 and percent >= 10:
         return 1.0
@@ -82,14 +88,15 @@ def consume_amount(
 ) -> float:
     """
     How many inventory units to deduct after an operation.
-    - expendable: all engaged
+    - expendable / missile: all engaged (each missile once)
     - sortie: attrition only (units return from mission)
     - specialist: 1 charge per use (caller handles)
     """
     ctype = consumption_type(code)
+    cat = str((_CAT.get(code) or {}).get("category") or "")
     if engaged <= 0:
         return 0.0
-    if ctype == "expendable":
+    if ctype == "expendable" or cat == "missile" or str(code).startswith("m_"):
         return float(math.ceil(engaged - 1e-9))
     if ctype == "specialist":
         return 1.0  # one charge

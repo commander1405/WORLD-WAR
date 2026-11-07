@@ -1064,11 +1064,33 @@ class Game:
             meta = self._cat.get(code_i) or eq.meta(code_i)
             if not meta:
                 continue
-            cat = meta.get("category")
+            cat = str(meta.get("category") or "")
             q = float(r["quantity"])
-            if cat == "defense" or str(code_i).startswith("m_sam") or code_i in ("d_radar", "d_sam"):
+            if q <= 0:
+                continue
+            if cat == "defense" or str(code_i).startswith("m_sam") or str(code_i).startswith("d_"):
                 total += eq.defense_power_for_unit(code_i, q)
         return total
+
+    async def list_defense_systems(self, code: str) -> list[dict]:
+        """Active defense units with names and quantities for combat reports."""
+        inv = await self.db.fetch(
+            "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0", (code,)
+        )
+        out = []
+        for r in inv:
+            code_i = r["item_code"]
+            meta = self._cat.get(code_i) or eq.meta(code_i) or {}
+            cat = str(meta.get("category") or "")
+            if cat == "defense" or str(code_i).startswith("m_sam") or str(code_i).startswith("d_"):
+                out.append({
+                    "item_code": code_i,
+                    "name": meta.get("name_fa") or code_i,
+                    "qty": float(r["quantity"]),
+                    "defense": float(meta.get("defense") or eq.defense_of(code_i) or 0),
+                })
+        out.sort(key=lambda x: -x["defense"])
+        return out
 
     async def active_cyber_disable_ratio(self, code: str) -> float:
         """Return fraction of defense currently disabled (0..1)."""
@@ -1090,17 +1112,23 @@ class Game:
         return min(0.9, best)
 
     async def defense_coverage(self, code: str, attack_kind: str) -> tuple[float, dict]:
-        """Return (intercept_ratio 0..cap, meta for report)."""
-        raw = await self.defense_power(code)
-        # soft curve, expensive to max out
-        base = raw / (raw + 120.0) * 0.72
+        """Return (intercept_ratio 0..cap, meta for report). Defense must matter when present."""
+        systems = await self.list_defense_systems(code)
+        raw = sum(float(s["defense"]) * float(s["qty"]) for s in systems)
+        # meaningful curve: a few systems already intercept noticeably
+        base = raw / (raw + 55.0) * 0.88 if raw > 0 else 0.0
         base = min(self.DEFENSE_COVER_CAP, max(0.0, base))
-        # effectiveness by attack type
-        kind_factor = {"air": 1.0, "ground": 0.55, "sea": 0.45, "nuclear": 0.2}.get(attack_kind, 0.5)
+        kind_factor = {
+            "air": 1.05,
+            "ground": 0.82,
+            "sea": 0.70,
+            "nuclear": 0.35,
+            "missile": 1.0,
+        }.get(attack_kind, 0.75)
         disable = await self.active_cyber_disable_ratio(code)
         bonus = 0.0
         try:
-            if attack_kind in ("air", "missile", "nuke"):
+            if attack_kind in ("air", "missile", "nuke", "nuclear"):
                 bonus += await self.control.defense_air_bonus(code)
             if attack_kind in ("sea", "naval"):
                 bonus += await self.control.defense_sea_bonus(code)
@@ -1114,6 +1142,7 @@ class Game:
             "kind_factor": kind_factor,
             "cyber_disable": disable,
             "intercept": effective,
+            "systems": systems,
         }
 
     async def _consume_item(self, code: str, item: str, qty: float = 1.0) -> None:
@@ -1447,7 +1476,7 @@ class Game:
                 dmg = eq.damage_of(ic)
                 if dmg <= 0:
                     continue
-                eng = eq.engage_quantity(q, percent)
+                eng = eq.engage_quantity(q, percent, item_code=ic)
                 if eng <= 0:
                     continue
                 if eng > q:
@@ -1562,16 +1591,26 @@ class Game:
             raw = (ap - dp * 0.55) * 0.35 + 15
             damage = max(5.0, min(220.0, raw))
             cover, def_meta = await self.defense_coverage(defender, kind)
-            intercepted = damage * cover
-            damage = max(3.0, damage - intercepted)
+            raw_damage = float(damage)
+            intercepted = raw_damage * cover
+            damage = max(3.0, raw_damage - intercepted)
             victory = ap >= dp * 0.85
-            result = f"پیروزی {attacker}" if victory else f"برتری دفاعی {defender}"
-            # stash logs on self for report (per-call local via nonlocal later)
+            atk_label = await self.country_name_only(attacker)
+            def_label = await self.country_name_only(defender)
+            result = f"پیروزی {atk_label}" if victory else f"برتری دفاعی {def_label}"
             self._last_combat_log = {
                 "consumption": consumption_log,
                 "specialists": specialist_used,
                 "ap": ap,
                 "dp": dp,
+                "raw_damage": raw_damage,
+                "intercepted": intercepted,
+                "final_damage": damage,
+                "cover": cover,
+                "percent": percent,
+                "kind": kind,
+                "systems": def_meta.get("systems") or [],
+                "victory": victory,
             }
 
             new_hp = max(0.0, float(d["hp"]) - damage)
@@ -1591,26 +1630,31 @@ class Game:
                 a_treas = float(a["treasury"])
 
             loot = 0.0
-            if victory:
-                # loot based on damage relative to max_hp and defender treasury
-                hp_ratio = damage / max(float(d["max_hp"]), 1.0)
-                econ_ratio = min(1.0, damage / 100.0)
-                loot = float(d["treasury"]) * min(self.MAX_LOOT_RATIO, 0.02 + hp_ratio * 0.1 + econ_ratio * 0.03)
-                loot = min(loot, self.MAX_LOOT_ABS, float(d["treasury"]) * 0.5)
-                loot = max(0.0, loot)
-                if loot > 0:
-                    await tx.execute(
-                        "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-                        (float(d["treasury"]) - loot, defender),
-                    )
-                    await tx.execute(
-                        "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-                        (a_treas + loot, attacker),
-                    )
-                    a_treas = a_treas + loot
-                    await self._tx_log_activity(
-                        tx, "economy", f"غنیمت جنگی {int(loot):,} از {defender}", attacker, pid
-                    )
+            # real loot from defender treasury proportional to HP damage dealt
+            d_treas = float(d["treasury"])
+            max_hp = max(float(d["max_hp"]), 1.0)
+            hp_ratio = min(1.0, damage / max_hp)
+            # base share of treasury from damage; victory doubles
+            share = hp_ratio * (0.18 if victory else 0.07)
+            share = min(getattr(self, "MAX_LOOT_RATIO", 0.25), share)
+            loot = d_treas * share
+            loot = min(loot, float(getattr(self, "MAX_LOOT_ABS", 50_000_000)), d_treas * 0.45)
+            loot = max(0.0, loot)
+            if loot >= 1:
+                await tx.execute(
+                    "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                    (d_treas - loot, defender),
+                )
+                await tx.execute(
+                    "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                    (a_treas + loot, attacker),
+                )
+                a_treas = a_treas + loot
+                await self._tx_log_activity(
+                    tx, "economy",
+                    f"غنیمت جنگی {int(loot):,} از {await self.country_name_only(defender)}",
+                    attacker, pid,
+                )
 
             # set cooldown
             seq = int((ws or {}).get("attack_seq") or 0) + 1
@@ -1678,26 +1722,50 @@ class Game:
         clog = getattr(self, "_last_combat_log", {}) or {}
         cons_lines = clog.get("consumption") or []
         sp_lines = clog.get("specialists") or []
-        extra_parts = []
-        if cons_lines:
-            extra_parts.append("📦 مصرف تجهیزات مهاجم:")
-            extra_parts.extend(cons_lines[:12])
-        if sp_lines:
-            extra_parts.append("متخصص: " + "، ".join(sp_lines))
-        if clog.get("ap") is not None:
-            extra_parts.append(f"قدرت حمله: {clog['ap']:.0f} | قدرت دفاع: {clog.get('dp', 0):.0f}")
-        extra = ("\n" + "\n".join(extra_parts)) if extra_parts else ""
-        report = (
-            f"⚔️ گزارش درگیری\n\n"
-            f"مهاجم: {atk_name}\nمدافع: {def_name}\nنوع: {kind}\nشدت: {int(percent)}٪\n"
-            f"نتیجه: {result}\n"
-            f"خسارت نهایی: {int(damage)}\n"
-            f"رهگیری پدافند: {int(intercepted)} (پوشش {cover*100:.0f}٪)\n"
-            f"سلامت فعلی مدافع: {int(max(0, new_hp))}\n"
-            f"غنیمت نقدی: {int(loot):,}"
-            + (" (غنیمتی نبود)" if loot <= 0 and victory else "")
-            + extra
+        kind_fa = {"ground": "زمینی", "air": "هوایی", "sea": "دریایی"}.get(
+            str(clog.get("kind") or kind), str(clog.get("kind") or kind)
         )
+        pct = int(float(clog.get("percent") or percent or 0))
+        raw_d = float(clog.get("raw_damage") or (damage + intercepted))
+        inter = float(clog.get("intercepted") or intercepted)
+        final_d = float(clog.get("final_damage") or damage)
+        cover_p = float(clog.get("cover") or cover) * 100.0
+        systems = clog.get("systems") or []
+        sys_lines = []
+        for s in systems[:8]:
+            sys_lines.append(f"• {s.get('name')}: {int(s.get('qty') or 0)} واحد (قدرت {int(s.get('defense') or 0)})")
+        if not sys_lines:
+            sys_lines = ["• بدون پدافند فعال"]
+
+        report_lines = [
+            "⚔️ گزارش درگیری",
+            "",
+            f"مهاجم: {atk_name}",
+            f"مدافع: {def_name}",
+            f"نوع حمله: {kind_fa}",
+            f"شدت حمله: {pct}٪",
+            f"نتیجه: {result}",
+            "",
+            f"💥 خسارت اولیه: {int(raw_d)}",
+            f"🛡 رهگیری پدافند: {int(inter)} ({cover_p:.0f}٪ پوشش)",
+            f"✅ خسارت نهایی واردشده: {int(final_d)}",
+            f"❌ خسارت گرفته‌نشده (رهگیری‌شده): {int(inter)}",
+            "",
+            "پدافندهای مدافع:",
+            *sys_lines,
+            "",
+            f"❤️ سلامت نهایی مدافع: {int(max(0, new_hp))}/{int(float(d.get('max_hp') or 1000))}",
+            f"💰 غنیمت نقدی: {int(loot):,}",
+        ]
+        if cons_lines:
+            report_lines += ["", "📦 مصرف تجهیزات مهاجم:"] + list(cons_lines[:12])
+        if sp_lines:
+            report_lines.append("متخصص: " + "، ".join(sp_lines))
+        if clog.get("ap") is not None:
+            report_lines.append(
+                f"قدرت حمله: {float(clog['ap']):.0f} | قدرت دفاع: {float(clog.get('dp') or 0):.0f}"
+            )
+        report = chr(10).join(report_lines)
         await self.broadcast_log("attack", report)
         if new_hp <= 0:
             await self.alliances.on_country_destroyed(defender)
@@ -1705,16 +1773,11 @@ class Game:
         try:
             wear = await self.apply_defense_wear(defender)
             if wear:
-                report = report + "\n\n⚠️ " + wear
-        except Exception:
-            pass
-        try:
-            warn = await self.alliances.check_betrayal_on_attack(pid, attacker, defender)
-            if warn:
-                report = report + "\n\n" + warn
+                report = report + chr(10) + chr(10) + "⚠️ " + wear
         except Exception:
             pass
         return report
+
 
     async def _tx_log_activity(self, tx, kind, summary, country=None, player_id=None):
         nid = await tx.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_activity")
@@ -4360,13 +4423,13 @@ class Game:
         return msg
 
     async def apply_defense_wear(self, code: str) -> str | None:
-        """After being attacked, accumulate hits; every 3–5 hits destroy 1 defense unit."""
+        """After being attacked, accumulate hits; every 20–40 hits destroy 1 defense unit."""
         import random
         row = await self.db.fetchrow(
             "SELECT * FROM ng_defense_hits WHERE country_code=$1", (code,)
         )
         if not row:
-            break_at = random.randint(3, 5)
+            break_at = random.randint(20, 40)
             try:
                 await self.db.execute(
                     "INSERT INTO ng_defense_hits (country_code, hits, break_at) VALUES ($1,$2,$3)",
@@ -4376,7 +4439,7 @@ class Game:
                 pass
             return None
         hits = int(row["hits"]) + 1
-        break_at = int(row["break_at"] or 3)
+        break_at = int(row["break_at"] or 20)
         if hits < break_at:
             await self.db.execute(
                 "UPDATE ng_defense_hits SET hits=$1 WHERE country_code=$2",
@@ -4408,7 +4471,7 @@ class Game:
                     "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
                     (left, code, victim["item_code"]),
                 )
-        new_break = random.randint(3, 5)
+        new_break = random.randint(20, 40)
         await self.db.execute(
             "UPDATE ng_defense_hits SET hits=0, break_at=$1 WHERE country_code=$2",
             (new_break, code),
