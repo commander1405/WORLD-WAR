@@ -2187,8 +2187,9 @@ def register_handlers(bot, app_ctx: dict):
 
             # attack
             if data == "ng:atkmenu" or data.startswith("ng:atk:") or data.startswith("ng:fight:") or data.startswith("ng:nuke"):
+                is_un = (code or "").upper() == "UN" and owner
                 meta = await game.db.fetchrow("SELECT war_enabled FROM world_meta WHERE id=1")
-                if not meta or not int(meta.get("war_enabled") or 0):
+                if not is_un and (not meta or not int(meta.get("war_enabled") or 0)):
                     await out(
                         "⚠️ امکان انجام حمله وجود ندارد.\n\nدر حال حاضر وضعیت جنگ در جهان بسته است.\nسازمان ملل باید جنگ را فعال کند."
                     )
