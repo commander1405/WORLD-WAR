@@ -1151,7 +1151,9 @@ class Game:
             (code, item),
         )
         if not row or float(row["quantity"]) < qty:
-            raise GameError("آیتم موردنیاز را ندارید.")
+            meta = self._cat.get(item) or {}
+            name = meta.get("name_fa") or item
+            raise GameError(f"«{name}» در انبار ندارید. از فروشگاه > هک و امنیت بخرید.")
         left = float(row["quantity"]) - qty
         if left <= 0:
             await self.db.execute(
@@ -1165,6 +1167,7 @@ class Game:
             )
 
     async def hack_defense(self, attacker: str, target: str, pid: int) -> str:
+        await self.ensure_cyber_tables()
         if attacker == target:
             raise GameError("هدف نامعتبر است")
         if target == UN_CODE:
@@ -1233,11 +1236,12 @@ class Game:
             f"پایان اثر: {ends.astimezone(TEHRAN).strftime('%H:%M:%S')} (تهران)\n"
             f"۱ عدد «هکر پدافند» مصرف شد."
         )
-        await self.log_activity("cyber", f"هکر پدافند روی {target}", attacker, pid)
+        await self.log_activity("cyber", f"هکر پدافند روی {tname}", attacker, pid)
         await self.broadcast_log("admin", f"💻 اختلال پدافند موقت روی {tname}")
         return msg
 
     async def hack_assets(self, attacker: str, target: str, pid: int) -> str:
+        await self.ensure_cyber_tables()
         if attacker == target:
             raise GameError("هدف نامعتبر است")
         if target == UN_CODE:
@@ -1286,7 +1290,7 @@ class Game:
         if eco:
             text += "\n\nدارایی‌های اقتصادی:\n" + "\n".join(eco[:15])
         text += "\n\n۱ عدد «هکر دارایی» مصرف شد. هیچ تغییری در دارایی هدف اعمال نشد."
-        await self.log_activity("cyber", f"هکر دارایی روی {target}", attacker, pid)
+        await self.log_activity("cyber", f"هکر دارایی روی {tname}", attacker, pid)
         return text
 
     async def cyber_status_text(self, code: str) -> str:
@@ -1875,6 +1879,28 @@ class Game:
         if pid is None:
             return True
         return self.is_owner(int(pid))
+
+
+
+    async def ensure_cyber_tables(self) -> None:
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ng_cyber_effects (
+                    id INTEGER PRIMARY KEY,
+                    target_country TEXT NOT NULL,
+                    effect_type TEXT NOT NULL,
+                    source_country TEXT,
+                    actor_id INTEGER,
+                    strength REAL DEFAULT 0.3,
+                    starts_at TEXT,
+                    ends_at TEXT,
+                    created_at TEXT
+                )
+                """
+            )
+        except Exception:
+            pass
 
 
     async def ban(self, actor: int, target: int, reason: str = "") -> str:

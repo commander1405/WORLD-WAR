@@ -1159,22 +1159,24 @@ def register_handlers(bot, app_ctx: dict):
                 rows = []
                 if combat_on:
                     rows.append([("⚔️ حمله نظامی", "ng:atkmenu")])
-                    rows.append([("💻 هک و امنیت", "ng:cyber")])
-                    rows.append([("🛡 وضعیت پدافند من", "ng:mydef")])
+                # هک و پدافند همیشه در دسترس (وابسته به جنگ نیست)
+                rows.append([("💻 هک و امنیت", "ng:cyber")])
+                rows.append([("🛡 وضعیت پدافند من", "ng:mydef")])
                 rows.append([("🎁 استفاده از آیتم لجندری", "ng:leguse")])
                 rows.append(back_row())
                 if is_un and not war_on:
                     head = (
                         "🇺🇳 سازمان ملل — دسترسی ویژه" + "\n"
-                        + "جنگ جهان برای بازیکنان بسته است، ولی شما می‌توانید حمله/هک کنید."
+                        + "جنگ برای بازیکنان بسته است؛ حمله نظامی برای شما باز است." + "\n"
+                        + "هک و پدافند برای همه فعال است."
                     )
                 elif war_on:
                     head = "⚔️ عملیات نظامی و سایبری:"
                 else:
                     head = (
-                        "⚠️ وضعیت جنگ در جهان بسته است." + "\n"
-                        + "حمله نظامی / هک / پدافند فعلاً غیرفعال است." + "\n\n"
-                        + "می‌توانید از آیتم‌های لجندری استفاده کنید:"
+                        "⚠️ جنگ جهان بسته است — حمله نظامی غیرفعال." + "\n"
+                        + "💻 هک و امنیت و وضعیت پدافند فعال هستند." + "\n"
+                        + "همچنین می‌توانید از آیتم‌های لجندری استفاده کنید:"
                     )
                 await reply(message, head, ik(rows))
                 return
@@ -2146,10 +2148,10 @@ def register_handlers(bot, app_ctx: dict):
                     )
                     return
                 action = data.split(":")[-1]
-                countries = [
-                    c for c in await game.list_countries()
-                    if c.get("owner_player_id") and c["country_code"] != code
-                ]
+                countries, _tot = await game.list_attack_targets(code, page=0, page_size=40)
+                if not countries:
+                    await out("هیچ کشور دارای رهبری برای هدف‌گیری نیست.", ik([back_row()]))
+                    return
                 if action == "hackdef":
                     rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"ng:chdef:{c['country_code']}")] for c in countries]
                     rows.append(back_row())
