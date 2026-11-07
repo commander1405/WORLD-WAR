@@ -37,6 +37,7 @@ class Game:
         self.alliances = AllianceService(self)
         self.legendary = LegendaryService(self)
         self.control = ControlService(self)
+        self.donations = DonationService(self)
 
     # ---------- bootstrap ----------
     async def bootstrap(self) -> None:
@@ -85,6 +86,10 @@ class Game:
             await self.legendary.ensure_tables()
         except Exception:
             log.exception("legendary ensure")
+        try:
+            await self.donations.ensure_tables()
+        except Exception:
+            log.exception("donations ensure")
         await self._seed_catalog()
         await self._seed_countries()
         await self.ensure_un_country()

@@ -42,6 +42,7 @@ BTN_ALLY = "🤝 اتحادها"
 BTN_CTRL = "🏛 کنترل کشور"
 BTN_TREATY = "⚖ پیمان‌ها"
 BTN_WALLET = "💰 کیف پول"
+BTN_DONATE = "💎 حمایت مالی"
 
 _pending: dict[int, dict] = {}
 
@@ -58,7 +59,7 @@ def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
         [BTN_ATTACK, BTN_STMT],
         [BTN_WORLD, BTN_REPORT],
         [BTN_ABOUT, BTN_GUIDE],
-        [BTN_PICK],
+        [BTN_DONATE, BTN_PICK],
     ]
     # dedupe texts while preserving order (fixes accidental double wallet)
     seen = set()
@@ -97,7 +98,7 @@ def cancel_row():
 MENU_TEXTS = {
     BTN_MY, BTN_ECO, BTN_SHOP, BTN_INV, BTN_MKT, BTN_TRADE, BTN_DIPLO,
     BTN_PEACE, BTN_ATTACK, BTN_STMT, BTN_WORLD, BTN_REPORT, BTN_PICK,
-    BTN_OWNER, BTN_WORKSHOP, BTN_ABOUT, BTN_GUIDE, BTN_REF, BTN_ALLY, BTN_CTRL, BTN_TREATY, BTN_WALLET,
+    BTN_OWNER, BTN_WORKSHOP, BTN_ABOUT, BTN_GUIDE, BTN_REF, BTN_ALLY, BTN_CTRL, BTN_TREATY, BTN_WALLET, BTN_DONATE,
     "/start", "شروع", "منو", "menu", "/admin", "/owner", "/panel",
 }
 
@@ -458,6 +459,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("💰 گرفتن مالیات", "ng:otax"), ("⚖️ محکوم کردن کشور", "ng:ocondemn")],
                     [("❤️ دیدن HP ها", "ng:ohp"), ("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
                     [("🎁 مدیریت لجندری", "ng:oleg"), ("💰 شارژ کیف پول", "ng:owallet")],
+                    [("💎 حمایت مالی", "ng:odonate")],
                     [("⚙️ قیمت و استفاده لجندری", "ng:olegprices")],
                     [("🏷 قیمت فروشگاه", "ng:oprices"), ("🏷 تخفیف فروشگاه", "ng:odiscount")],
                     [("🔴 ریست کامل جهان", "ng:oreset1")],
@@ -627,6 +629,73 @@ def register_handlers(bot, app_ctx: dict):
                     except Exception:
                         msg = "❌ عدد معتبر وارد کنید."
                     await reply(message, msg, main_kb(owner))
+                    return
+
+                if kind == "donation_amount":
+                    raw = (text or "").strip().replace(",", "").replace("،", "").replace(" ", "")
+                    # persian digits
+                    raw = raw.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+                    try:
+                        amount = float(raw)
+                    except Exception:
+                        await reply(message, "فقط عدد معتبر بنویس. مثال: 50000", ik([cancel_row()]))
+                        return
+                    try:
+                        from modules.ng.donations import DonationError as _DE
+                        author = getattr(message, "author", None) or getattr(message, "from_user", None)
+                        uname = getattr(author, "username", None) if author else None
+                        dname = getattr(author, "first_name", None) or getattr(author, "name", None) if author else None
+                        drow = await game.donations.submit(
+                            pid, amount, username=str(uname or ""), display_name=str(dname or uname or pid)
+                        )
+                        _pending.pop(pid, None)
+                        await reply(
+                            message,
+                            f"✅ درخواست حمایت ثبت شد.\nشناسه: #{drow['id']}\nمبلغ: {int(amount):,} تومان\nپس از بررسی مالک اطلاع می‌دهیم.",
+                            main_kb(owner),
+                        )
+                        # notify owner with buttons
+                        try:
+                            if game.owner_id:
+                                await bot.send_message(
+                                    int(game.owner_id),
+                                    f"💎 درخواست حمایت جدید\n#{drow['id']}\nکاربر: {dname or uname or pid}\nمبلغ: {int(amount):,}",
+                                    components=ik([
+                                        [("✅ تأیید", f"ng:donrev:ok:{drow['id']}"), ("❌ رد", f"ng:donrev:no:{drow['id']}")],
+                                    ]),
+                                )
+                        except Exception:
+                            log.exception("notify owner donation")
+                    except Exception as e:
+                        await reply(message, f"❌ {e}", ik([cancel_row()]))
+                    return
+                if kind == "donation_set_total":
+                    if not owner:
+                        _pending.pop(pid, None)
+                        await reply(message, "❌ فقط مالک")
+                        return
+                    raw = (text or "").strip().replace(",", "").replace(" ", "")
+                    raw = raw.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+                    try:
+                        amount = float(raw)
+                        msg = await game.donations.set_total_manual(pid, amount)
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(True))
+                    except Exception as e:
+                        await reply(message, f"❌ {e}")
+                    return
+                if kind and str(kind).startswith("donation_set_"):
+                    if not owner:
+                        _pending.pop(pid, None)
+                        await reply(message, "❌ فقط مالک")
+                        return
+                    field = str(kind).replace("donation_set_", "")
+                    try:
+                        msg = await game.donations.set_field(pid, field, text)
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(True))
+                    except Exception as e:
+                        await reply(message, f"❌ {e}")
                     return
                 if kind == "law_title":
                     st["title"] = text.strip()[:80]
@@ -1222,6 +1291,23 @@ def register_handlers(bot, app_ctx: dict):
                 await reply(message, await game.workshop_status(code), ik(rows))
                 return
 
+
+            if text == BTN_DONATE or text == "💎 منم حمایت کن":
+                try:
+                    body = await game.donations.intro_text()
+                    await reply(
+                        message,
+                        body,
+                        ik([
+                            [("✅ ثبت درخواست حمایت", "ng:donate:new")],
+                            [("🔙 منوی اصلی", "ng:home")],
+                        ]),
+                    )
+                except Exception as e:
+                    log.exception("donate intro")
+                    await reply(message, f"❌ {e}", main_kb(owner))
+                return
+
             if text == BTN_ABOUT:
                 about = await game.get_setting("about_message", game.DEFAULT_ABOUT)
                 await reply(message, about, main_kb(owner))
@@ -1353,7 +1439,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # owner callbacks — server-side authorization
-            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc") or data.startswith("ng:ogiveall") or data.startswith("ng:odaily") or data.startswith("ng:ohp") or data.startswith("ng:osethp") or data.startswith("ng:oleg") or data.startswith("ng:owallet") or data.startswith("ng:olegprices"):
+            if data.startswith("ng:o") or data.startswith("ng:owar") or data.startswith("ng:onuke") or data.startswith("ng:ostmt") or data.startswith("ng:onpt") or data.startswith("ng:ologs") or data.startswith("ng:ostart") or data.startswith("ng:oabout") or data.startswith("ng:oban") or data.startswith("ng:ounban") or data.startswith("ng:omoney") or data.startswith("ng:oreset") or data.startswith("ng:sapp") or data.startswith("ng:srej") or data.startswith("ng:nptok") or data.startswith("ng:nptno") or data.startswith("ng:logtoggle") or data.startswith("ng:otest") or data.startswith("ng:oforce") or data.startswith("ng:ou") or data.startswith("ng:otax") or data.startswith("ng:ocondemn") or data.startswith("ng:oureset") or data.startswith("ng:oally") or data.startswith("ng:oaway") or data.startswith("ng:orefstats") or data.startswith("ng:odbl") or data.startswith("ng:oudbl") or data.startswith("ng:olaws") or data.startswith("ng:lawok") or data.startswith("ng:lawno") or data.startswith("ng:oprice") or data.startswith("ng:odisc") or data.startswith("ng:ogiveall") or data.startswith("ng:odaily") or data.startswith("ng:ohp") or data.startswith("ng:osethp") or data.startswith("ng:oleg") or data.startswith("ng:owallet") or data.startswith("ng:olegprices") or data.startswith("ng:odonate") or data.startswith("ng:donrev"):
                 if not owner:
                     await out("❌ دسترسی مجاز نیست.")
                     return
@@ -2198,6 +2284,129 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             # attack
+
+            # ---- donations ----
+            if data in ("ng:donate", "ng:donate:start"):
+                try:
+                    body = await game.donations.intro_text()
+                    await out(body, ik([
+                        [("✅ ثبت درخواست حمایت", "ng:donate:new")],
+                        back_row(),
+                    ]))
+                except Exception as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:donate:new":
+                _pending[pid] = {"kind": "donation_amount"}
+                await out(
+                    "مبلغ حمایت را به تومان بنویس (فقط عدد).\nمثال: 50000",
+                    ik([cancel_row()]),
+                )
+                return
+            if data.startswith("ng:donrev:"):
+                if not owner:
+                    await out("❌ فقط مالک")
+                    return
+                parts = data.split(":")
+                if len(parts) < 4:
+                    await out("درخواست نامعتبر")
+                    return
+                action, did_s = parts[2], parts[3]
+                try:
+                    drow = await game.donations.review(int(did_s), pid, action == "ok")
+                    if action == "ok":
+                        await out(f"✅ حمایت #{did_s} تأیید شد.\nمبلغ: {int(float(drow['amount'])):,}")
+                        try:
+                            await bot.send_message(
+                                int(drow["player_id"]),
+                                f"✅ حمایت مالی شما به مبلغ {int(float(drow['amount'])):,} تومان تأیید شد.\nاز شما سپاسگزاریم 💎",
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            ann = game.donations.announcement_text(drow)
+                            await game.broadcast_log("donation", ann)
+                            if game.group_id:
+                                try:
+                                    await bot.send_message(
+                                        game.group_id,
+                                        ann,
+                                        components=ik([[("💎 منم حمایت کن", "ng:donate:start")]]),
+                                    )
+                                except Exception:
+                                    pass
+                        except Exception:
+                            log.exception("donation announce")
+                    else:
+                        await out(f"❌ حمایت #{did_s} رد شد.")
+                        try:
+                            await bot.send_message(
+                                int(drow["player_id"]),
+                                f"❌ درخواست حمایت مالی شما (#{did_s}) رد شد.",
+                            )
+                        except Exception:
+                            pass
+                except Exception as e:
+                    await out(f"❌ {e}")
+                return
+            if data == "ng:odonate":
+                if not owner:
+                    await out("❌ فقط مالک")
+                    return
+                st = await game.donations.stats()
+                cfg = await game.donations.config()
+                text = (
+                    "💎 مدیریت حمایت مالی\n\n"
+                    f"مجموع تأییدشده: {int(st['total_approved']):,}\n"
+                    f"تعداد تأیید: {st['count_approved']}\n"
+                    f"در انتظار: {st['count_pending']}\n"
+                    f"ردشده: {st['count_rejected']}\n\n"
+                    f"کارت: {cfg['card']}\n"
+                    f"صاحب کارت: {cfg['card_name']}"
+                )
+                await out(text, ik([
+                    [("⏳ در انتظار", "ng:odonate:pending"), ("✅ تأییدشده", "ng:odonate:approved")],
+                    [("❌ ردشده", "ng:odonate:rejected")],
+                    [("💳 شماره کارت", "ng:odonate:card"), ("👤 نام صاحب کارت", "ng:odonate:card_name")],
+                    [("📝 متن معرفی", "ng:odonate:intro"), ("📄 توضیحات", "ng:odonate:instructions")],
+                    [("💰 تنظیم مجموع آمار", "ng:odonate:total")],
+                    back_row(),
+                ]))
+                return
+            if data.startswith("ng:odonate:"):
+                if not owner:
+                    await out("❌ فقط مالک")
+                    return
+                sub = data.split(":", 2)[-1]
+                if sub in ("pending", "approved", "rejected"):
+                    rows = await game.donations.list_by_status(sub, 20)
+                    if not rows:
+                        await out("موردی نیست.", ik([[("🔙 بازگشت", "ng:odonate")]]))
+                        return
+                    lines = [f"فهرست ({sub}):"]
+                    kb_rows = []
+                    for r in rows:
+                        lines.append(
+                            f"#{r['id']} | {int(float(r['amount'])):,} | {r.get('display_name') or r.get('username') or r['player_id']}"
+                        )
+                        if sub == "pending":
+                            kb_rows.append([
+                                (f"✅ #{r['id']}", f"ng:donrev:ok:{r['id']}"),
+                                (f"❌ #{r['id']}", f"ng:donrev:no:{r['id']}"),
+                            ])
+                    kb_rows.append([("🔙 بازگشت", "ng:odonate")])
+                    await out("\n".join(lines), ik(kb_rows))
+                    return
+                if sub in ("card", "card_name", "intro", "instructions"):
+                    _pending[pid] = {"kind": f"donation_set_{sub}"}
+                    await out("مقدار جدید را بفرستید:", ik([cancel_row()]))
+                    return
+                if sub == "total":
+                    _pending[pid] = {"kind": "donation_set_total"}
+                    await out("مبلغ کل حمایت‌های نمایشی را به عدد بنویسید:", ik([cancel_row()]))
+                    return
+                return
+
             if data == "ng:atkmenu" or data.startswith("ng:atk:") or data.startswith("ng:fight:") or data.startswith("ng:nuke"):
                 is_un = (code or "").upper() == "UN" and owner
                 meta = await game.db.fetchrow("SELECT war_enabled FROM world_meta WHERE id=1")
