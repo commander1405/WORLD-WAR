@@ -2254,11 +2254,11 @@ def register_handlers(bot, app_ctx: dict):
                         rows.append([(f"{label} ۳۰٪", f"ng:fight:{dst}:{kind}:30"), (f"{label} ۵۰٪", f"ng:fight:{dst}:{kind}:50")])
                         rows.append([(f"{label} ۱۰۰٪", f"ng:fight:{dst}:{kind}:100")])
                 # atomic option if has bomb
-                bombs = await game.db.fetchrow(
-                    "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='nuke_bomb'",
-                    (code,),
-                )
-                if bombs and float(bombs["quantity"]) >= 1:
+                try:
+                    bomb_n = await game.count_atom_bombs(code)
+                except Exception:
+                    bomb_n = 0.0
+                if bomb_n >= 1 or ((code or "").upper() == "UN" and owner):
                     rows.append([("☢️ حمله با بمب اتم", f"ng:nuke:{dst}")])
                 if not rows:
                     await out("❌ هیچ نیروی قابل‌استفاده‌ای برای انواع حمله ندارید.")

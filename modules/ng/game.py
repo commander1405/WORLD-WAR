@@ -20,6 +20,8 @@ log = logging.getLogger(__name__)
 TEHRAN = ZoneInfo("Asia/Tehran")
 SEED_PATH = Path(__file__).resolve().parents[2] / "data" / "countries" / "seed_ng.json"
 UN_CODE = "UN"
+# Shop sells nuke_bomb; older workshop used item_atom_bomb — both accepted
+ATOM_BOMB_CODES = ("nuke_bomb", "item_atom_bomb")
 
 
 class GameError(Exception):
@@ -3671,17 +3673,17 @@ class Game:
                     (float(c["treasury"]) - money_cost, code),
                 )
             inv_b = await tx.fetchrow(
-                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='item_atom_bomb'",
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='nuke_bomb'",
                 (code,),
             )
             if inv_b:
                 await tx.execute(
-                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='item_atom_bomb'",
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='nuke_bomb'",
                     (float(inv_b["quantity"]) + 1, code),
                 )
             else:
                 await tx.execute(
-                    "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,'item_atom_bomb',1)",
+                    "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,'nuke_bomb',1)",
                     (code,),
                 )
         await self.log_activity("workshop", "ساخت بمب اتم بازی", code, pid)
@@ -3692,6 +3694,45 @@ class Game:
             f"هزینه پول: {int(self.BOMB_MONEY_COST):,}\\n"
             f"مصرف اورانیوم: {int(self.BOMB_URANIUM_COST)} واحد معادل"
         )
+
+
+    async def count_atom_bombs(self, code: str) -> float:
+        total = 0.0
+        for ic in ATOM_BOMB_CODES:
+            row = await self.db.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                (code, ic),
+            )
+            if row:
+                total += float(row["quantity"] or 0)
+        return total
+
+    async def consume_atom_bomb(self, code: str, tx=None) -> None:
+        """Consume 1 bomb from either shop or workshop item code."""
+        db = tx or self.db
+        for ic in ATOM_BOMB_CODES:
+            row = await db.fetchrow(
+                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                (code, ic),
+            )
+            if not row:
+                continue
+            q = float(row["quantity"] or 0)
+            if q < 1:
+                continue
+            left = q - 1.0
+            if left <= 0:
+                await db.execute(
+                    "DELETE FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                    (code, ic),
+                )
+            else:
+                await db.execute(
+                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                    (left, code, ic),
+                )
+            return
+        raise GameError("بمب اتم در انبار ندارید. از فروشگاه (هسته‌ای) بخرید یا در کارگاه بسازید.")
 
     async def attack_nuclear(self, attacker: str, defender: str, pid: int) -> str:
         un_atk = self.is_un_force(attacker, pid)
@@ -3739,18 +3780,44 @@ class Game:
                     raise
                 except Exception:
                     pass
-            bomb = await tx.fetchrow(
-                "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='item_atom_bomb'",
-                (attacker,),
-            )
-            bq = float(bomb["quantity"]) if bomb else 0.0
-            if bq < 1 and not un_atk:
-                raise GameError("بمب اتم در انبار ندارید.")
-            if bq >= 1:
-                await tx.execute(
-                    "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code='item_atom_bomb'",
-                    (bq - 1, attacker),
-                )
+                        # accept both shop (nuke_bomb) and legacy (item_atom_bomb) codes
+            if not un_atk:
+                total_bombs = 0.0
+                for _ic in ATOM_BOMB_CODES:
+                    _row = await tx.fetchrow(
+                        "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                        (attacker, _ic),
+                    )
+                    if _row:
+                        total_bombs += float(_row["quantity"] or 0)
+                if total_bombs < 1:
+                    raise GameError("بمب اتم در انبار ندارید. از فروشگاه بخرید یا در کارگاه بسازید.")
+                consumed = False
+                for _ic in ATOM_BOMB_CODES:
+                    _row = await tx.fetchrow(
+                        "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                        (attacker, _ic),
+                    )
+                    if not _row:
+                        continue
+                    bq = float(_row["quantity"] or 0)
+                    if bq < 1:
+                        continue
+                    left = bq - 1.0
+                    if left <= 0:
+                        await tx.execute(
+                            "DELETE FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                            (attacker, _ic),
+                        )
+                    else:
+                        await tx.execute(
+                            "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                            (left, attacker, _ic),
+                        )
+                    consumed = True
+                    break
+                if not consumed:
+                    raise GameError("بمب اتم در انبار ندارید.")
             pct = random.uniform(0.25, 0.35)
             damage = float(d["max_hp"]) * pct
             cover, _ = await self.defense_coverage(defender, "nuclear")
