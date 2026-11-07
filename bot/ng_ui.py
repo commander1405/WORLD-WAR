@@ -676,42 +676,30 @@ def register_handlers(bot, app_ctx: dict):
 
                 if kind == "donation_amount":
                     raw = (text or "").strip().replace(",", "").replace("،", "").replace(" ", "")
-                    # persian digits
                     raw = raw.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
                     try:
                         amount = float(raw)
                     except Exception:
                         await reply(message, "فقط عدد معتبر بنویس. مثال: 50000", ik([cancel_row()]))
                         return
-                    try:
-                        from modules.ng.donations import DonationError as _DE
-                        author = getattr(message, "author", None) or getattr(message, "from_user", None)
-                        uname = getattr(author, "username", None) if author else None
-                        dname = getattr(author, "first_name", None) or getattr(author, "name", None) if author else None
-                        drow = await game.donations.submit(
-                            pid, amount, username=str(uname or ""), display_name=str(dname or uname or pid)
-                        )
-                        _pending.pop(pid, None)
-                        await reply(
-                            message,
-                            f"✅ درخواست حمایت ثبت شد.\nشناسه: #{drow['id']}\nمبلغ: {int(amount):,} تومان\nپس از بررسی مالک اطلاع می‌دهیم.",
-                            main_kb(owner),
-                        )
-                        # notify owner with buttons
-                        try:
-                            if game.owner_id:
-                                await bot.send_message(
-                                    int(game.owner_id),
-                                    f"💎 درخواست حمایت جدید\n#{drow['id']}\nکاربر: {dname or uname or pid}\nمبلغ: {int(amount):,}",
-                                    components=ik([
-                                        [("✅ تأیید", f"ng:donrev:ok:{drow['id']}"), ("❌ رد", f"ng:donrev:no:{drow['id']}")],
-                                    ]),
-                                )
-                        except Exception:
-                            log.exception("notify owner donation")
-                    except Exception as e:
-                        await reply(message, f"❌ {e}", ik([cancel_row()]))
+                    if amount < 1000:
+                        await reply(message, "حداقل مبلغ ۱٬۰۰۰ تومان است.", ik([cancel_row()]))
+                        return
+                    method = st.get("method") or "card"
+                    st["amount"] = amount
+                    st["kind"] = "donation_show_name"
+                    _pending[pid] = st
+                    await reply(
+                        message,
+                        f"مبلغ: {int(amount):,} تومان\n\nمی‌خواهی اسمت در اطلاع همگانی نمایش داده شود؟",
+                        ik([
+                            [("✅ بله، نمایش بده", "ng:donate:showname:1"), ("❌ خیر، ناشناس", "ng:donate:showname:0")],
+                            cancel_row(),
+                        ]),
+                    )
                     return
+
+
                 if kind == "donation_set_total":
                     if not owner:
                         _pending.pop(pid, None)
@@ -1351,20 +1339,21 @@ def register_handlers(bot, app_ctx: dict):
 
 
             if text == BTN_DONATE or text == "💎 منم حمایت کن":
+                nav_push(pid, "donate")
                 try:
                     body = await game.donations.intro_text()
-                    await reply(
-                        message,
-                        body,
-                        ik([
-                            [("✅ ثبت درخواست حمایت", "ng:donate:new")],
-                            [("🔙 منوی اصلی", "ng:home")],
-                        ]),
-                    )
-                except Exception as e:
-                    log.exception("donate intro")
-                    await reply(message, f"❌ {e}", main_kb(owner))
+                except Exception:
+                    body = "💎 حمایت مالی\n\nآیا واقعاً از حمایت کردن مطمئنی؟\nاز دادن درخواست الکی خودداری کنید."
+                await reply(
+                    message,
+                    body,
+                    ik([
+                        [("✅ بله", "ng:donate:yes"), ("❌ خیر", "ng:donate:no")],
+                        back_row(),
+                    ]),
+                )
                 return
+
 
             if text == BTN_ABOUT:
                 about = await game.get_setting("about_message", game.DEFAULT_ABOUT)
@@ -1636,12 +1625,14 @@ def register_handlers(bot, app_ctx: dict):
                     try:
                         txt = await game.donations.intro_text()
                     except Exception:
-                        txt = "💎 حمایت مالی از توسعه WORLD WAR"
-                    rows = [
-                        [("✅ ثبت درخواست حمایت", "ng:donate:new")],
-                        back_row(),
-                    ]
-                    await out(txt, ik(rows))
+                        txt = "💎 حمایت مالی\n\nآیا واقعاً از حمایت کردن مطمئنی؟\nاز دادن درخواست الکی خودداری کنید."
+                    await out(
+                        txt,
+                        ik([
+                            [("✅ بله", "ng:donate:yes"), ("❌ خیر", "ng:donate:no")],
+                            back_row(),
+                        ]),
+                    )
                     return
                 if key == "about":
                     txt = None
@@ -2577,69 +2568,133 @@ def register_handlers(bot, app_ctx: dict):
             # attack
 
             # ---- donations ----
+            # ---- donations (multi-step) ----
             if data in ("ng:donate", "ng:donate:start"):
                 try:
                     body = await game.donations.intro_text()
-                    await out(body, ik([
-                        [("✅ ثبت درخواست حمایت", "ng:donate:new")],
+                except Exception:
+                    body = "💎 حمایت مالی\n\nآیا واقعاً از حمایت کردن مطمئنی؟\nاز دادن درخواست الکی خودداری کنید."
+                await out(
+                    body,
+                    ik([
+                        [("✅ بله", "ng:donate:yes"), ("❌ خیر", "ng:donate:no")],
                         back_row(),
-                    ]))
+                    ]),
+                )
+                return
+            if data == "ng:donate:no":
+                _pending.pop(pid, None)
+                await out("لغو شد. حمایت کاملاً اختیاری است.", main_kb(owner))
+                return
+            if data == "ng:donate:yes":
+                try:
+                    await game.donations.assert_can_request(pid)
                 except Exception as e:
                     await out(f"❌ {e}")
-                return
-            if data == "ng:donate:new":
-                _pending[pid] = {"kind": "donation_amount"}
+                    return
                 await out(
-                    "مبلغ حمایت را به تومان بنویس (فقط عدد).\nمثال: 50000",
+                    "روش خود را انتخاب کنید:",
+                    ik([
+                        [("🎁 پاکت هدیه", "ng:donate:method:gift")],
+                        [("💳 کارت‌به‌کارت", "ng:donate:method:card")],
+                        [("❌ انصراف", "ng:donate:no")],
+                    ]),
+                )
+                return
+            if data.startswith("ng:donate:method:"):
+                method = data.split(":")[-1]
+                if method not in ("gift", "card"):
+                    await out("روش نامعتبر")
+                    return
+                try:
+                    await game.donations.assert_can_request(pid)
+                except Exception as e:
+                    await out(f"❌ {e}")
+                    return
+                _pending[pid] = {"kind": "donation_wait_pay", "method": method}
+                if method == "gift":
+                    body = (
+                        "🎁 پاکت هدیه\n\n"
+                        "لطفاً به پیوی مالک بروید و مبلغ درخواست را واریز کنید،\n"
+                        "سپس روی دکمه «می‌خواهم واریز کنم» بزنید."
+                    )
+                else:
+                    cfg = await game.donations.config()
+                    body = (
+                        "💳 کارت‌به‌کارت\n\n"
+                        "لطفاً مبلغ دلخواه را به شماره کارت زیر واریز کنید و سپس روی «می‌خواهم واریز کنم» بزنید.\n\n"
+                        f"شماره کارت: `{cfg.get('card') or '—'}`\n"
+                        f"به‌نام: {cfg.get('card_name') or '—'}"
+                    )
+                await out(
+                    body,
+                    ik([
+                        [("✅ می‌خواهم واریز کنم", "ng:donate:paid")],
+                        [("❌ انصراف", "ng:donate:no")],
+                    ]),
+                )
+                return
+            if data == "ng:donate:paid":
+                st = _pending.get(pid) or {}
+                method = st.get("method") or "card"
+                try:
+                    await game.donations.assert_can_request(pid)
+                except Exception as e:
+                    await out(f"❌ {e}")
+                    return
+                _pending[pid] = {"kind": "donation_amount", "method": method}
+                await out(
+                    "مبلغ واریزی را به تومان بنویس (فقط عدد).\nمثال: 50000",
                     ik([cancel_row()]),
                 )
                 return
-            if data.startswith("ng:donrev:"):
-                if not owner:
-                    await out("❌ فقط مالک")
+            if data.startswith("ng:donate:showname:"):
+                show = data.split(":")[-1] == "1"
+                st = _pending.get(pid) or {}
+                if st.get("kind") not in ("donation_show_name", "donation_amount") or not st.get("amount"):
+                    await out("نشست منقضی شده. دوباره از حمایت مالی شروع کن.", main_kb(owner))
+                    _pending.pop(pid, None)
                     return
-                parts = data.split(":")
-                if len(parts) < 4:
-                    await out("درخواست نامعتبر")
-                    return
-                action, did_s = parts[2], parts[3]
+                amount = float(st["amount"])
+                method = st.get("method") or "card"
                 try:
-                    drow = await game.donations.review(int(did_s), pid, action == "ok")
-                    if action == "ok":
-                        await out(f"✅ حمایت #{did_s} تأیید شد.\nمبلغ: {int(float(drow['amount'])):,}")
-                        try:
+                    from modules.ng.donations import DonationError as _DE
+                    # author from cq
+                    author = getattr(cq, "from_user", None) or getattr(cq, "author", None)
+                    uname = getattr(author, "username", None) if author else None
+                    dname = None
+                    if author:
+                        dname = getattr(author, "first_name", None) or getattr(author, "name", None)
+                    drow = await game.donations.submit(
+                        pid,
+                        amount,
+                        username=str(uname or ""),
+                        display_name=str(dname or uname or pid),
+                        show_name=show,
+                        method=method,
+                    )
+                    _pending.pop(pid, None)
+                    await out(
+                        f"✅ درخواست حمایت ثبت شد.\nشناسه: #{drow['id']}\nمبلغ: {int(amount):,} تومان\n"
+                        "پس از بررسی مالک نتیجه اعلام می‌شود.",
+                        main_kb(owner),
+                    )
+                    try:
+                        if game.owner_id:
+                            body = game.donations.owner_review_text(drow)
                             await bot.send_message(
-                                int(drow["player_id"]),
-                                f"✅ حمایت مالی شما به مبلغ {int(float(drow['amount'])):,} تومان تأیید شد.\nاز شما سپاسگزاریم 💎",
+                                int(game.owner_id),
+                                body,
+                                components=ik([
+                                    [("✅ تأیید", f"ng:donrev:ok:{drow['id']}"), ("❌ رد", f"ng:donrev:no:{drow['id']}")],
+                                ]),
                             )
-                        except Exception:
-                            pass
-                        try:
-                            ann = game.donations.announcement_text(drow)
-                            await game.broadcast_log("donation", ann)
-                            if game.group_id:
-                                try:
-                                    await bot.send_message(
-                                        game.group_id,
-                                        ann,
-                                        components=ik([[("💎 منم حمایت کن", "ng:donate:start")]]),
-                                    )
-                                except Exception:
-                                    pass
-                        except Exception:
-                            log.exception("donation announce")
-                    else:
-                        await out(f"❌ حمایت #{did_s} رد شد.")
-                        try:
-                            await bot.send_message(
-                                int(drow["player_id"]),
-                                f"❌ درخواست حمایت مالی شما (#{did_s}) رد شد.",
-                            )
-                        except Exception:
-                            pass
+                    except Exception:
+                        log.exception("notify owner donation")
                 except Exception as e:
                     await out(f"❌ {e}")
                 return
+
             if data == "ng:odonate":
                 if not owner:
                     await out("❌ فقط مالک")
