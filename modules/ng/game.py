@@ -2557,10 +2557,88 @@ class Game:
         return out
 
     async def world_status_text(self, *, for_owner: bool = False) -> str:
+        """Always live stats from DB — never hardcoded totals."""
+        # heal owned-but-destroyed flags only (non-destructive)
+        try:
+            await self.db.execute(
+                """
+                UPDATE ng_countries
+                SET is_destroyed=0
+                WHERE owner_player_id IS NOT NULL AND COALESCE(is_destroyed,0)=1
+                """
+            )
+        except Exception:
+            pass
+
         meta = await self.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
-        countries = await self.list_countries(for_owner=for_owner)
-        free = sum(1 for c in countries if not c.get("owner_player_id") and c.get("country_code") != UN_CODE)
-        owned = sum(1 for c in countries if c.get("owner_player_id") and c.get("country_code") != UN_CODE)
+        rows = await self.db.fetch("SELECT * FROM ng_countries")
+
+        banned_ids = set()
+        try:
+            for b in await self.db.fetch(
+                "SELECT player_id FROM ng_players WHERE COALESCE(is_banned,0)=1"
+            ):
+                banned_ids.add(int(b["player_id"]))
+        except Exception:
+            pass
+
+        countries_all = []
+        groups_all = []
+        un_row = None
+        for r in rows:
+            code = r.get("country_code")
+            if code == UN_CODE:
+                un_row = r
+                continue
+            et = str(r.get("entity_type") or "country")
+            if et == "group":
+                groups_all.append(r)
+            else:
+                countries_all.append(r)
+
+        def _alive(r):
+            return int(r.get("is_destroyed") or 0) == 0
+
+        def _valid_owner(r):
+            if not _alive(r):
+                return False
+            oid = r.get("owner_player_id")
+            if oid is None:
+                return False
+            try:
+                oid = int(oid)
+            except Exception:
+                return False
+            if oid in banned_ids:
+                return False
+            return True
+
+        def _free(r):
+            if not _alive(r):
+                return False
+            oid = r.get("owner_player_id")
+            if oid is None:
+                return True
+            try:
+                return int(oid) in banned_ids
+            except Exception:
+                return False
+
+        total_countries = sum(1 for c in countries_all if _alive(c))
+        owned_countries = sum(1 for c in countries_all if _valid_owner(c))
+        free_countries = sum(1 for c in countries_all if _free(c))
+
+        total_groups = sum(1 for c in groups_all if _alive(c))
+        owned_groups = sum(1 for c in groups_all if _valid_owner(c))
+        free_groups = sum(1 for c in groups_all if _free(c))
+
+        # active players = distinct valid owners of alive non-UN entities
+        owner_set = set()
+        for c in countries_all + groups_all:
+            if _valid_owner(c):
+                owner_set.add(int(c["owner_player_id"]))
+        active_players = len(owner_set)
+
         war = "فعال ⚔️" if meta and int(meta.get("war_enabled") or 0) else "غیرفعال 🕊"
         nuke = "فعال" if meta and int(meta.get("nuclear_enabled") or 0) else "غیرفعال"
         started = (meta or {}).get("started_at") or "—"
@@ -2571,24 +2649,39 @@ class Game:
             started_fa = dt.astimezone(TEHRAN).strftime("%Y/%m/%d %H:%M")
         except Exception:
             started_fa = str(started)[:19]
-        total = 31 if for_owner else 30
+
+        un_line = ""
+        if for_owner:
+            if un_row and un_row.get("owner_player_id"):
+                un_line = "🇺🇳 سازمان ملل: فعال (تحت مالک)"
+            else:
+                un_line = "🇺🇳 سازمان ملل: بدون مالک"
+
         lines = [
             "🌍 گزارش وضعیت جهان",
             "",
             "━━━━━━━━━━━━━━",
             "🗺 اطلاعات جهان",
-            f"👥 کشورهای ثبت‌شده: {total}",
-            f"🟢 کشورهای دارای رهبر: {owned}",
-            f"⚪ کشورهای آزاد: {free}",
+            f"👥 کشورهای زنده: {total_countries}",
+            f"🟢 کشورهای دارای رهبر: {owned_countries}",
+            f"⚪ کشورهای آزاد: {free_countries}",
+            f"🏴 گروهک‌های زنده: {total_groups}",
+            f"🟢 گروهک دارای رهبر: {owned_groups}",
+            f"⚪ گروهک آزاد: {free_groups}",
+            f"👤 بازیکنان با کشور/گروهک فعال: {active_players}",
             f"⚔️ وضعیت جنگ: {war}",
             f"☢ سیستم هسته‌ای: {nuke}",
+        ]
+        if un_line:
+            lines.append(un_line)
+        lines += [
             "",
             "━━━━━━━━━━━━━━",
             "📊 وضعیت کلی",
             f"🔄 تعداد بازنشانی‌ها: {int((meta or {}).get('reset_count') or 0)}",
             f"🕒 آغاز جهان (تهران): {started_fa}",
         ]
-        return "\n".join(lines)
+        return chr(10).join(lines)
 
     async def economy_card(self, code: str) -> str:
         c = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
