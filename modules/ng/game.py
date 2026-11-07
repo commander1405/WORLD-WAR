@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 TEHRAN = ZoneInfo("Asia/Tehran")
 SEED_PATH = Path(__file__).resolve().parents[2] / "data" / "countries" / "seed_ng.json"
 UN_CODE = "UN"
+RECOVERY_WINDOW_SEC = 3 * 60 * 60  # 3 hours owner recovery window
 # Shop sells nuke_bomb; older workshop used item_atom_bomb — both accepted
 ATOM_BOMB_CODES = ("nuke_bomb", "item_atom_bomb")
 
@@ -91,6 +92,25 @@ class Game:
             await self.donations.ensure_tables()
         except Exception:
             log.exception("donations ensure")
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ng_destroy_snapshots (
+                    id INTEGER PRIMARY KEY,
+                    player_id INTEGER NOT NULL,
+                    country_code TEXT NOT NULL,
+                    treasury REAL NOT NULL DEFAULT 0,
+                    max_hp REAL NOT NULL DEFAULT 1000,
+                    inventory_json TEXT NOT NULL DEFAULT '[]',
+                    buildings_json TEXT NOT NULL DEFAULT '[]',
+                    destroyed_at TEXT NOT NULL,
+                    recovered INTEGER NOT NULL DEFAULT 0,
+                    recovered_at TEXT
+                )
+                """
+            )
+        except Exception:
+            log.exception("destroy snapshots table")
         await self._seed_catalog()
         await self._seed_countries()
         await self.ensure_un_country()
@@ -1841,6 +1861,8 @@ class Game:
                 )
                 prev = d_row.get("owner_player_id")
                 if prev:
+                    # snapshot remaining assets before freeing country fully
+                    await self._capture_destroy_snapshot(tx, int(prev), defender)
                     until = (now + timedelta(seconds=DESTROY_WAIT_SEC)).isoformat()
                     await tx.execute(
                         "UPDATE ng_players SET country_code=NULL, destroy_cooldown_until=$1 WHERE player_id=$2",
@@ -3944,8 +3966,10 @@ class Game:
             destroyed = new_hp <= 0
             if destroyed:
                 prev = d.get("owner_player_id")
+                if prev:
+                    await self._capture_destroy_snapshot(tx, int(prev), defender)
                 await tx.execute(
-                    "UPDATE ng_countries SET owner_player_id=NULL, is_destroyed=0, claimed_at=NULL, hp=1000 WHERE country_code=$1",
+                    "UPDATE ng_countries SET owner_player_id=NULL, is_destroyed=0, claimed_at=NULL, hp=1000, treasury=0 WHERE country_code=$1",
                     (defender,),
                 )
                 if prev:
@@ -4531,6 +4555,200 @@ class Game:
             await self.log_activity("dm_notice", text, player_id=int(pl["player_id"]))
         await self.admin_log(actor, "condemn", f"{code}")
         return f"✅ بیانیه محکومیت {name} ثبت و برای انتشار صف شد."
+
+
+    async def _next_snapshot_id(self, tx=None) -> int:
+        db = tx or self.db
+        row = await db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_destroy_snapshots")
+        return int(row["id"])
+
+    async def _capture_destroy_snapshot(self, tx, player_id: int, country_code: str) -> None:
+        """Save remaining country state after loot so owner can recover within 3 hours."""
+        if not player_id or not country_code:
+            return
+        c = await tx.fetchrow(
+            "SELECT treasury, max_hp, hp FROM ng_countries WHERE country_code=$1",
+            (country_code,),
+        )
+        if not c:
+            return
+        inv = await tx.fetch(
+            "SELECT item_code, quantity FROM ng_inventory WHERE country_code=$1 AND quantity>0",
+            (country_code,),
+        )
+        buildings = []
+        try:
+            buildings = await tx.fetch(
+                "SELECT * FROM ng_buildings WHERE country_code=$1", (country_code,)
+            )
+        except Exception:
+            buildings = []
+        inv_payload = [
+            {"item_code": r["item_code"], "quantity": float(r["quantity"])}
+            for r in inv
+        ]
+        bld_payload = []
+        for r in buildings:
+            bld_payload.append({k: r[k] for k in r.keys()})
+        now = datetime.now(timezone.utc).isoformat()
+        sid = await self._next_snapshot_id(tx)
+        await tx.execute(
+            """
+            INSERT INTO ng_destroy_snapshots
+            (id, player_id, country_code, treasury, max_hp, inventory_json, buildings_json, destroyed_at, recovered)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0)
+            """,
+            (
+                sid,
+                int(player_id),
+                country_code,
+                float(c.get("treasury") or 0),
+                float(c.get("max_hp") or 1000),
+                json.dumps(inv_payload, ensure_ascii=False),
+                json.dumps(bld_payload, ensure_ascii=False),
+                now,
+            ),
+        )
+        # Clear leftover assets from free country so a new claim starts clean
+        await tx.execute("DELETE FROM ng_inventory WHERE country_code=$1", (country_code,))
+        try:
+            await tx.execute("DELETE FROM ng_buildings WHERE country_code=$1", (country_code,))
+        except Exception:
+            pass
+
+    async def clear_destroy_cooldown(self, actor: int, target_id: int) -> str:
+        """Owner removes the 30-minute post-destroy claim restriction."""
+        if not self.is_owner(actor):
+            raise GameError("فقط مالک")
+        p = await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (int(target_id),))
+        if not p:
+            raise GameError("بازیکن یافت نشد")
+        cd = p.get("destroy_cooldown_until")
+        if not cd:
+            return f"بازیکن {target_id} محدودیت نابودی فعال ندارد."
+        await self.db.execute(
+            "UPDATE ng_players SET destroy_cooldown_until=NULL WHERE player_id=$1",
+            (int(target_id),),
+        )
+        await self.admin_log(actor, "clear_destroy_cd", f"target={target_id} was={cd}")
+        return (
+            f"✅ محدودیت ۳۰ دقیقه نابودی برای بازیکن {target_id} برداشته شد.\n"
+            "اکنون می‌تواند کشور جدید انتخاب کند."
+        )
+
+    async def recover_destroyed_player(self, actor: int, target_id: int) -> str:
+        """Within 3 hours of destroy: restore same country + remaining assets, HP at half max."""
+        if not self.is_owner(actor):
+            raise GameError("فقط مالک")
+        target_id = int(target_id)
+        p = await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (target_id,))
+        if not p:
+            raise GameError("بازیکن یافت نشد")
+        # cannot recover if already owns a country
+        live = await self.resolve_country_for_player(target_id)
+        if live:
+            raise GameError("این بازیکن هم‌اکنون کشور دارد. ریکاوری ممکن نیست.")
+        snap = await self.db.fetchrow(
+            """
+            SELECT * FROM ng_destroy_snapshots
+            WHERE player_id=$1 AND recovered=0
+            ORDER BY id DESC LIMIT 1
+            """,
+            (target_id,),
+        )
+        if not snap:
+            raise GameError(
+                "اسنپ‌شات نابودی برای این بازیکن پیدا نشد.\n"
+                "ریکاوری فقط برای نابودی‌های بعد از این آپدیت و تا ۳ ساعت ممکن است."
+            )
+        destroyed_at = snap["destroyed_at"]
+        try:
+            dt = datetime.fromisoformat(str(destroyed_at).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            raise GameError("زمان نابودی نامعتبر است")
+        age = (datetime.now(timezone.utc) - dt).total_seconds()
+        if age > RECOVERY_WINDOW_SEC:
+            raise GameError(
+                f"مهلت ۳ ساعته ریکاوری تمام شده است "
+                f"({int(age // 60)} دقیقه از نابودی گذشته)."
+            )
+        code = str(snap["country_code"]).upper()
+        inv_list = json.loads(snap.get("inventory_json") or "[]")
+        treasury = float(snap.get("treasury") or 0)
+        max_hp = float(snap.get("max_hp") or 1000)
+        half_hp = max(1.0, max_hp / 2.0)
+        now = datetime.now(timezone.utc).isoformat()
+
+        async with self.db.transaction() as tx:
+            c = await tx.fetchrow(
+                "SELECT * FROM ng_countries WHERE country_code=$1", (code,)
+            )
+            if not c:
+                raise GameError("کشور اسنپ‌شات در دیتابیس نیست")
+            owner = c.get("owner_player_id")
+            if owner and int(owner) != target_id:
+                raise GameError(
+                    f"کشور {code} الان بازیکن دیگری دارد و قابل ریکاوری نیست."
+                )
+            # restore ownership + half HP + treasury from snapshot
+            await tx.execute(
+                """
+                UPDATE ng_countries
+                SET owner_player_id=$1, treasury=$2, hp=$3, max_hp=$4,
+                    is_destroyed=0, claimed_at=$5
+                WHERE country_code=$6
+                """,
+                (target_id, treasury, half_hp, max_hp, now, code),
+            )
+            # inventory from snapshot
+            await tx.execute("DELETE FROM ng_inventory WHERE country_code=$1", (code,))
+            for it in inv_list:
+                qty = float(it.get("quantity") or 0)
+                if qty <= 0:
+                    continue
+                await tx.execute(
+                    "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,$2,$3)",
+                    (code, it["item_code"], qty),
+                )
+            await tx.execute(
+                """
+                UPDATE ng_players
+                SET country_code=$1, destroy_cooldown_until=NULL
+                WHERE player_id=$2
+                """,
+                (code, target_id),
+            )
+            await tx.execute(
+                """
+                UPDATE ng_destroy_snapshots
+                SET recovered=1, recovered_at=$1
+                WHERE id=$2
+                """,
+                (now, int(snap["id"])),
+            )
+
+        label = await self.country_label(code)
+        await self.admin_log(
+            actor, "destroy_recover",
+            f"target={target_id} country={code} hp={int(half_hp)} treasury={int(treasury)}",
+        )
+        await self.log_activity(
+            "admin",
+            f"ریکاوری ۳ ساعته بازیکن {target_id} → {label} | HP={int(half_hp)}",
+            code,
+            actor,
+        )
+        return (
+            f"✅ ریکاوری انجام شد.\n"
+            f"بازیکن: {target_id}\n"
+            f"کشور: {label}\n"
+            f"خزانه بازگردانی‌شده: {int(treasury):,} تومان\n"
+            f"آیتم‌های باقی‌مانده: {len(inv_list)} نوع\n"
+            f"سلامت: {int(half_hp)} / {int(max_hp)} (نصف)\n"
+            f"محدودیت ۳۰ دقیقه هم برداشته شد."
+        )
 
     async def reset_player(self, actor: int, target_id: int) -> str:
         """Free player country and progress; keep identity, bans, audit logs."""

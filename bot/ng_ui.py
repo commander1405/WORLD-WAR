@@ -3345,6 +3345,8 @@ def register_handlers(bot, app_ctx: dict):
                     [("💵 دادن پول", f"ng:ougive:{tid}"), ("💸 گرفتن پول", f"ng:outake:{tid}")],
                     [("🧾 مالیات از کاربر", f"ng:outax:{tid}")],
                     [("🧬 جان ×۲ روشن", f"ng:oudblon:{tid}"), ("🧬 جان ×۲ خاموش", f"ng:oudbloff:{tid}")],
+                    [("⏱ رفع محدودیت ۳۰دقیقه", f"ng:oucdclear:{tid}")],
+                    [("♻️ ریکاوری ۳ ساعته", f"ng:ourecover:{tid}")],
                     [("♻️ ریست کردن کاربر", f"ng:oureset:{tid}")],
                     [("⬅️ لیست کاربران", "ng:o:players:0")],
                 ]
