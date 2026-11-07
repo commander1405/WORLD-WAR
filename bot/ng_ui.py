@@ -3353,6 +3353,86 @@ def register_handlers(bot, app_ctx: dict):
                 await out(card, ik(rows))
                 return
 
+            if data.startswith("ng:oucdclear:"):
+                try:
+                    tid = int(data.split(":")[-1])
+                except Exception:
+                    await out("❌ شناسه نامعتبر")
+                    return
+                try:
+                    msg = await game.clear_destroy_cooldown(pid, tid)
+                    await out(msg)
+                except GameError as e:
+                    await out(f"❌ {e}")
+                except Exception as e:
+                    log.exception("oucdclear")
+                    await out(f"❌ خطا در رفع محدودیت: {e}")
+                return
+
+            if data.startswith("ng:ourecover:"):
+                try:
+                    tid = int(data.split(":")[-1])
+                except Exception:
+                    await out("❌ شناسه نامعتبر")
+                    return
+                try:
+                    p = await game.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (tid,))
+                    if not p:
+                        await out("❌ بازیکن یافت نشد")
+                        return
+                    snap = await game.db.fetchrow(
+                        """
+                        SELECT * FROM ng_destroy_snapshots
+                        WHERE player_id=$1 AND recovered=0
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (tid,),
+                    )
+                    if not snap:
+                        await out(
+                            "❌ اسنپ‌شات نابودی برای این بازیکن نیست.\n"
+                            "ریکاوری فقط تا ۳ ساعت بعد از نابودی (پس از آپدیت ریکاوری) ممکن است."
+                        )
+                        return
+                    cname = await game.country_label(snap["country_code"])
+                    rows = [
+                        [("✅ تأیید ریکاوری", f"ng:ourecovergo:{tid}"), ("❌ انصراف", f"ng:ou:{tid}")],
+                    ]
+                    await out(
+                        "♻️ ریکاوری ۳ ساعته\n\n"
+                        f"بازیکن: {tid}\n"
+                        f"کشور: {cname}\n"
+                        f"خزانه ذخیره‌شده: {int(float(snap.get('treasury') or 0)):,}\n"
+                        f"حداکثر HP: {int(float(snap.get('max_hp') or 1000))}\n"
+                        f"HP بعد از ریکاوری: {int(float(snap.get('max_hp') or 1000) / 2)}\n"
+                        f"زمان نابودی: {snap.get('destroyed_at')}\n\n"
+                        "کشور + پول باقی‌مانده + آیتم‌های باقی‌مانده برمی‌گردد.\n"
+                        "جان نصف می‌شود. محدودیت ۳۰ دقیقه هم برداشته می‌شود.",
+                        ik(rows),
+                    )
+                except GameError as e:
+                    await out(f"❌ {e}")
+                except Exception as e:
+                    log.exception("ourecover")
+                    await out(f"❌ خطا در نمایش ریکاوری: {e}")
+                return
+
+            if data.startswith("ng:ourecovergo:"):
+                try:
+                    tid = int(data.split(":")[-1])
+                except Exception:
+                    await out("❌ شناسه نامعتبر")
+                    return
+                try:
+                    msg = await game.recover_destroyed_player(pid, tid)
+                    await out(msg)
+                except GameError as e:
+                    await out(f"❌ {e}")
+                except Exception as e:
+                    log.exception("ourecovergo")
+                    await out(f"❌ خطا در ریکاوری: {e}")
+                return
+
             if data.startswith("ng:oureset:"):
                 tid = int(data.split(":")[-1])
                 p = await game.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (tid,))
