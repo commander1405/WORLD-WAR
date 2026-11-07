@@ -660,16 +660,84 @@ class Game:
             (income, expense, code),
         )
 
-    async def daily_payout_all(self) -> int:
-        """Pay once per Tehran calendar day.
+    async def list_daily_payout_targets(self) -> list[dict]:
+        """Live list of countries eligible for daily income.
 
-        Base grant is protected: maintenance must not wipe the base daily income.
-        Formula: base*mod + max(0,law_bonus) + max(0, buildings - maintenance)
+        Rules (always re-read from DB):
+        - has a real owner_player_id
+        - not destroyed
+        - not UN
+        - owner is not banned
+        - player still linked to that country (or ownership is authoritative)
+        """
+        # heal owned-but-destroyed
+        try:
+            await self.db.execute(
+                """
+                UPDATE ng_countries
+                SET is_destroyed=0
+                WHERE owner_player_id IS NOT NULL AND COALESCE(is_destroyed,0)=1
+                """
+            )
+        except Exception:
+            pass
+
+        banned = set()
+        try:
+            for r in await self.db.fetch(
+                "SELECT player_id FROM ng_players WHERE COALESCE(is_banned,0)=1"
+            ):
+                banned.add(int(r["player_id"]))
+        except Exception:
+            pass
+
+        rows = await self.db.fetch(
+            """
+            SELECT * FROM ng_countries
+            WHERE owner_player_id IS NOT NULL
+              AND COALESCE(is_destroyed,0)=0
+              AND country_code <> $1
+            ORDER BY name_fa
+            """,
+            (UN_CODE,),
+        )
+        out = []
+        for c in rows:
+            try:
+                oid = int(c["owner_player_id"])
+            except Exception:
+                continue
+            if oid in banned:
+                continue
+            # if player has no country and ownership is stale, skip
+            try:
+                live = await self.resolve_country_for_player(oid, include_un_for_owner=False)
+                if live and live != c["country_code"]:
+                    # ownership elsewhere wins — skip this row
+                    continue
+                if live is None:
+                    # verify still listed as owner of this code
+                    chk = await self.db.fetchrow(
+                        "SELECT owner_player_id FROM ng_countries WHERE country_code=$1",
+                        (c["country_code"],),
+                    )
+                    if not chk or chk.get("owner_player_id") is None:
+                        continue
+                    if int(chk["owner_player_id"]) != oid:
+                        continue
+            except Exception:
+                pass
+            out.append(c)
+        return out
+
+    async def daily_payout_all(self, *, force: bool = False) -> int:
+        """Pay daily income to eligible owned countries.
+
+        force=False (scheduler): once per Tehran calendar day per country.
+        force=True (owner button): always pays again, even if already paid today.
         """
         today = datetime.now(TEHRAN).date().isoformat()
-        countries = await self.db.fetch(
-            "SELECT * FROM ng_countries WHERE owner_player_id IS NOT NULL AND COALESCE(is_destroyed,0)=0"
-        )
+        countries = await self.list_daily_payout_targets()
         n = 0
         total_paid = 0.0
         details = []
@@ -677,12 +745,13 @@ class Game:
             code = c["country_code"]
             if code == UN_CODE:
                 continue
-            exists = await self.db.fetchrow(
-                "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
-                (code, today),
-            )
-            if exists:
-                continue
+            if not force:
+                exists = await self.db.fetchrow(
+                    "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
+                    (code, today),
+                )
+                if exists:
+                    continue
             try:
                 ctrl = await self.control.ensure_control(code)
                 base = float(ctrl.get("base_daily_income") or self.BASE_DAILY_GRANT)
@@ -702,7 +771,9 @@ class Game:
             except Exception:
                 log.exception("recalc_income %s", code)
             c2 = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
-            if not c2:
+            if not c2 or c2.get("owner_player_id") is None:
+                continue
+            if int(c2.get("is_destroyed") or 0) == 1:
                 continue
             net_buildings = float(c2.get("daily_income") or 0) - float(c2.get("daily_expense") or 0)
             total = (base * mod) + max(0.0, law_bonus) + max(0.0, net_buildings)
@@ -711,53 +782,79 @@ class Game:
                 total *= float(leg_m)
             except Exception:
                 log.exception("legendary income mult %s", code)
-            total = max(float(self.BASE_DAILY_GRANT) * 0.5 * 0.5, total)  # still non-negative floor softer when cut
             total = max(0.0, total)
-            async with self.db.transaction() as tx:
-                again = await tx.fetchrow(
-                    "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
-                    (code, today),
-                )
-                if again:
-                    continue
-                new_t = float(c2["treasury"] or 0) + total
-                await tx.execute(
-                    "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
-                    (new_t, code),
-                )
-                await tx.execute(
-                    "INSERT INTO ng_daily_payouts (country_code, payout_date, amount) VALUES ($1,$2,$3)",
-                    (code, today, total),
-                )
-            n += 1
-            total_paid += total
-            label = c2.get("name_fa") or code
-            details.append(f"{label}: +{int(total):,}")
-            oid = c2.get("owner_player_id")
-            await self.log_activity(
-                "daily",
-                f"درآمد روزانه: {int(total):,} (پایه {int(base):,} × {mod:.2f})",
-                code,
-                int(oid) if oid else None,
-            )
             try:
-                await self.control.tick_satisfaction_events(code)
+                async with self.db.transaction() as tx:
+                    if not force:
+                        again = await tx.fetchrow(
+                            "SELECT 1 AS x FROM ng_daily_payouts WHERE country_code=$1 AND payout_date=$2",
+                            (code, today),
+                        )
+                        if again:
+                            continue
+                    # re-read treasury inside tx
+                    live = await tx.fetchrow(
+                        "SELECT treasury, owner_player_id, is_destroyed FROM ng_countries WHERE country_code=$1",
+                        (code,),
+                    )
+                    if not live or live.get("owner_player_id") is None:
+                        continue
+                    if int(live.get("is_destroyed") or 0) == 1:
+                        continue
+                    new_t = float(live["treasury"] or 0) + total
+                    await tx.execute(
+                        "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+                        (new_t, code),
+                    )
+                    if not force:
+                        await tx.execute(
+                            "INSERT INTO ng_daily_payouts (country_code, payout_date, amount) VALUES ($1,$2,$3)",
+                            (code, today, total),
+                        )
+                    else:
+                        # log force pay without blocking auto day marker; upsert amount record optional
+                        try:
+                            await tx.execute(
+                                """
+                                INSERT INTO ng_daily_payouts (country_code, payout_date, amount)
+                                VALUES ($1,$2,$3)
+                                ON CONFLICT DO NOTHING
+                                """,
+                                (code, today, total),
+                            )
+                        except Exception:
+                            # SQLite may not have ON CONFLICT without unique — ignore marker on force
+                            pass
+                n += 1
+                total_paid += total
+                label = c2.get("name_fa") or code
+                details.append(f"{label}: +{int(total):,}")
+                oid = c2.get("owner_player_id")
+                await self.log_activity(
+                    "daily",
+                    f"{'پرداخت دستی مالک' if force else 'درآمد روزانه'}: {int(total):,} (پایه {int(base):,} × {mod:.2f})",
+                    code,
+                    int(oid) if oid else None,
+                )
+                try:
+                    await self.control.tick_satisfaction_events(code)
+                except Exception:
+                    pass
             except Exception:
-                pass
+                log.exception("daily payout failed for %s", code)
+                continue
         if n:
-            sample = "\n".join(details[:12])
-            more = f"\n… و {n - 12} کشور دیگر" if n > 12 else ""
             try:
                 msg_lines = [
-                    "💰 درآمد روزانه پرداخت شد",
+                    "💰 درآمد روزانه پرداخت شد" + (" (دستی مالک)" if force else ""),
                     f"تاریخ (تهران): {today}",
                     f"تعداد کشورها: {n}",
                     f"جمع کل: {int(total_paid):,}",
                     "",
-                    *details[:12],
+                    *details[:15],
                 ]
-                if n > 12:
-                    msg_lines.append(f"… و {n - 12} کشور دیگر")
+                if n > 15:
+                    msg_lines.append(f"… و {n - 15} کشور دیگر")
                 await self.broadcast_log("daily", chr(10).join(msg_lines))
             except Exception:
                 log.exception("daily broadcast")

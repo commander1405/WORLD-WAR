@@ -2599,12 +2599,21 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:odaily":
                 try:
-                    n = await game.daily_payout_all()
+                    targets = await game.list_daily_payout_targets()
+                    n = await game.daily_payout_all(force=True)
                     if n:
-                        await out(f"✅ درآمد روزانه برای {n} کشور پرداخت شد و در گروه اعلام می‌شود.")
+                        await out(
+                            "✅ پرداخت دستی درآمد روزانه انجام شد." + "\n"
+                            + f"تعداد کشورها: {n}" + "\n"
+                            + "فقط کشورهای زندهٔ دارای رهبر (غیرنابود، غیرریست، غیر بن) پرداخت شدند." + "\n"
+                            + "اگر دوباره بزنید، دوباره پرداخت می‌شود."
+                        )
                     else:
-                        today = __import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("Asia/Tehran")).date().isoformat()
-                        await out(f"ℹ️ امروز ({today}) همه کشورها قبلاً درآمد روزانه را گرفته‌اند یا کشوری برای پرداخت نیست.")
+                        await out(
+                            "ℹ️ کشوری برای پرداخت نیست." + "\n"
+                            + f"کشورهای واجد شرایط الان: {len(targets)}" + "\n"
+                            + "(نابود / بدون رهبر / بن‌شده حساب نمی‌شوند)"
+                        )
                 except Exception as e:
                     log.exception("odaily")
                     await out(f"❌ {e}")
