@@ -21,6 +21,16 @@ log = logging.getLogger(__name__)
 TEHRAN = ZoneInfo("Asia/Tehran")
 SEED_PATH = Path(__file__).resolve().parents[2] / "data" / "countries" / "seed_ng.json"
 UN_CODE = "UN"
+
+def is_un_code(code: str | None) -> bool:
+    """UN, UN2, UN3, ... are all United Nations faction countries."""
+    c = (code or "").strip().upper()
+    if c == "UN":
+        return True
+    if c.startswith("UN") and len(c) > 2 and c[2:].isdigit():
+        return True
+    return False
+
 RECOVERY_WINDOW_SEC = 3 * 60 * 60  # 3 hours owner recovery window
 # Shop sells nuke_bomb; older workshop used item_atom_bomb — both accepted
 ATOM_BOMB_CODES = ("nuke_bomb", "item_atom_bomb")
@@ -34,6 +44,7 @@ class Game:
     def __init__(self, db: Database, owner_id: int = 0, group_id: str | None = None):
         self.db = db
         self.owner_id = owner_id
+        self._extra_owner_ids: set[int] = set()
         self.group_id = group_id
         self._cat = {c["item_code"]: c for c in CATALOG}
         self.alliances = AllianceService(self)
@@ -115,7 +126,9 @@ class Game:
             log.exception("destroy snapshots table")
         await self._seed_catalog()
         await self._seed_countries()
+        await self.ensure_owner_tables()
         await self.ensure_un_country()
+        await self.ensure_all_owner_countries()
         await self._seed_bot_settings()
         await self._seed_membership()
 
@@ -232,6 +245,45 @@ class Game:
         except Exception:
             log.exception("entity_type sync")
 
+
+    async def ensure_owner_tables(self) -> None:
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ng_extra_owners (
+                    player_id INTEGER PRIMARY KEY,
+                    un_code TEXT NOT NULL UNIQUE,
+                    added_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+        except Exception:
+            log.exception("ensure ng_extra_owners")
+
+    def is_primary_owner(self, pid: int) -> bool:
+        """Only config OWNER_ID may manage the co-owner list."""
+        return bool(self.owner_id) and int(pid) == int(self.owner_id)
+
+    async def list_extra_owner_ids(self) -> list[int]:
+        try:
+            rows = await self.db.fetch(
+                "SELECT player_id FROM ng_extra_owners WHERE COALESCE(active,1)=1"
+            )
+            return [int(r["player_id"]) for r in rows]
+        except Exception:
+            return []
+
+    async def all_owner_ids(self) -> list[int]:
+        ids = []
+        if self.owner_id:
+            ids.append(int(self.owner_id))
+        for x in await self.list_extra_owner_ids():
+            if x not in ids:
+                ids.append(x)
+        return ids
+
     async def ensure_un_country(self) -> None:
         """Ensure UN country exists and is permanently owned by the bot owner."""
         if not self.owner_id:
@@ -300,8 +352,19 @@ class Game:
                 "INSERT INTO ng_players (player_id, username, display_name, joined_at, last_seen_at) VALUES ($1,$2,$3,$4,$4)",
                 (pid, username, display, now),
             )
-        if self.owner_id and int(pid) == int(self.owner_id):
-            await self.ensure_un_country()
+        if self.is_owner(int(pid)):
+            if self.is_primary_owner(int(pid)):
+                await self.ensure_un_country()
+            else:
+                try:
+                    er = await self.db.fetchrow(
+                        "SELECT un_code FROM ng_extra_owners WHERE player_id=$1 AND COALESCE(active,1)=1",
+                        (int(pid),),
+                    )
+                    if er:
+                        await self.ensure_owner_faction_country(int(pid), str(er["un_code"]))
+                except Exception:
+                    pass
         return await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (pid,))
 
     async def assert_not_banned(self, pid: int) -> None:
@@ -324,27 +387,46 @@ class Game:
     async def resolve_country_for_player(self, pid: int, *, include_un_for_owner: bool = False) -> Optional[str]:
         """Canonical country for a player: ownership in ng_countries wins over ng_players cache."""
         pid = int(pid)
-        if include_un_for_owner and self.owner_id and pid == int(self.owner_id):
-            await self.ensure_un_country()
-            # Prefer real owned country if any, else UN
+        if include_un_for_owner and self.is_owner(pid):
+            if self.is_primary_owner(pid):
+                await self.ensure_un_country()
+                un_code = UN_CODE
+            else:
+                row = await self.db.fetchrow(
+                    "SELECT un_code FROM ng_extra_owners WHERE player_id=$1 AND COALESCE(active,1)=1",
+                    (pid,),
+                )
+                un_code = str(row["un_code"]) if row else None
+                if un_code:
+                    await self.ensure_owner_faction_country(pid, un_code)
+            # Prefer non-UN owned country if any, else UN faction
             owned = await self.db.fetchrow(
-                "SELECT country_code FROM ng_countries WHERE owner_player_id=$1 AND country_code<>$2 AND is_destroyed=0 ORDER BY claimed_at DESC NULLS LAST",
-                (pid, UN_CODE),
+                """
+                SELECT country_code FROM ng_countries
+                WHERE owner_player_id=$1 AND COALESCE(is_destroyed,0)=0
+                ORDER BY claimed_at DESC
+                """,
+                (pid,),
             )
-            if owned:
+            if owned and not is_un_code(owned["country_code"]):
                 return owned["country_code"]
-            return UN_CODE
-        # 1) authoritative: country whose owner is this player
+            if un_code:
+                return un_code
+            if self.is_primary_owner(pid):
+                return UN_CODE
+        # 1) authoritative: country whose owner is this player (exclude UN faction for normal players)
         owned = await self.db.fetchrow(
             """
             SELECT country_code FROM ng_countries
-            WHERE owner_player_id=$1 AND country_code<>$2 AND COALESCE(is_destroyed,0)=0
+            WHERE owner_player_id=$1 AND COALESCE(is_destroyed,0)=0
             ORDER BY claimed_at DESC
             """,
-            (pid, UN_CODE),
+            (pid,),
         )
         if owned:
             code = owned["country_code"]
+            if is_un_code(code) and not self.is_owner(pid):
+                return None
             # heal split-brain cache
             try:
                 await self.db.execute(
@@ -357,7 +439,7 @@ class Game:
         # 2) fallback cache on player row
         p = await self.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (pid,))
         code = (p or {}).get("country_code")
-        if not code or code == UN_CODE:
+        if not code or (is_un_code(code) and not self.is_owner(pid)):
             return None
         c = await self.db.fetchrow(
             "SELECT owner_player_id, is_destroyed FROM ng_countries WHERE country_code=$1",
@@ -377,9 +459,23 @@ class Game:
         return code
 
     async def player_country(self, pid: int) -> Optional[str]:
-        if self.owner_id and int(pid) == int(self.owner_id):
-            await self.ensure_un_country()
-            return UN_CODE
+        if self.is_owner(int(pid)):
+            # bind UN faction country for any owner
+            if self.is_primary_owner(int(pid)):
+                await self.ensure_un_country()
+                return UN_CODE
+            # co-owner
+            try:
+                row = await self.db.fetchrow(
+                    "SELECT un_code FROM ng_extra_owners WHERE player_id=$1 AND COALESCE(active,1)=1",
+                    (int(pid),),
+                )
+                if row:
+                    code = str(row["un_code"])
+                    await self.ensure_owner_faction_country(int(pid), code)
+                    return code
+            except Exception:
+                log.exception("co-owner country resolve")
         return await self.resolve_country_for_player(pid, include_un_for_owner=False)
 
     # ---------- claim ----------
@@ -408,7 +504,7 @@ class Game:
         )
         if for_owner or include_un:
             return rows
-        return [r for r in rows if r.get("country_code") != UN_CODE]
+        return [r for r in rows if not is_un_code(r.get("country_code"))]
 
     async def list_attack_targets(self, attacker_code: str | None, page: int = 0, page_size: int = 25) -> tuple[list[dict], int]:
         """All currently owned, living countries except attacker — always live from DB."""
@@ -2000,7 +2096,7 @@ class Game:
         nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_statements")
         now = datetime.now(timezone.utc).isoformat()
         sid = int(nid["id"])
-        if code == UN_CODE and self.is_owner(pid):
+        if is_un_code(code) and self.is_owner(pid):
             await self.db.execute(
                 "INSERT INTO ng_statements (id, country_code, player_id, body, status, created_at, reviewed_at) VALUES ($1,$2,$3,$4,'approved',$5,$5)",
                 (sid, code, pid, body[:2000], now),
@@ -2039,7 +2135,7 @@ class Game:
             c = await self.db.fetchrow(
                 "SELECT * FROM ng_countries WHERE country_code=$1", (s["country_code"],)
             )
-            is_un = (s["country_code"] == UN_CODE) or ((c or {}).get("country_code") == UN_CODE)
+            is_un = is_un_code(s.get("country_code")) or is_un_code((c or {}).get("country_code"))
             if is_un:
                 text = "🇺🇳 بیانیه رسمی سازمان ملل" + chr(10) + chr(10) + str(s["body"])
                 # one path only: group_log_loop sends and pins
@@ -2058,7 +2154,17 @@ class Game:
 
     # ---------- admin ----------
     def is_owner(self, pid: int) -> bool:
-        return self.owner_id and int(pid) == int(self.owner_id)
+        """Primary or any active co-owner (server-side)."""
+        try:
+            pid = int(pid)
+        except Exception:
+            return False
+        if self.owner_id and pid == int(self.owner_id):
+            return True
+        # cache-less DB check is async — use sync flag filled by refresh; fallback query not available
+        # use in-memory set refreshed on ensure/add/remove
+        return pid in getattr(self, "_extra_owner_ids", set())
+
 
 
     async def get_player_cash(self, pid: int) -> float:
@@ -2090,11 +2196,193 @@ class Game:
             log.exception("sync_cash_from_country %s", code)
 
 
+
+    async def refresh_extra_owners_cache(self) -> None:
+        try:
+            await self.ensure_owner_tables()
+            ids = await self.list_extra_owner_ids()
+            self._extra_owner_ids = set(int(x) for x in ids)
+        except Exception:
+            self._extra_owner_ids = set()
+            log.exception("refresh_extra_owners_cache")
+
+    async def ensure_all_owner_countries(self) -> None:
+        """Create/bind UN, UN2, UN3... for primary and co-owners."""
+        await self.ensure_owner_tables()
+        await self.refresh_extra_owners_cache()
+        await self.ensure_un_country()
+        rows = await self.db.fetch(
+            "SELECT * FROM ng_extra_owners WHERE COALESCE(active,1)=1 ORDER BY un_code"
+        )
+        for r in rows:
+            try:
+                await self.ensure_owner_faction_country(
+                    int(r["player_id"]), str(r["un_code"]), slot_name=str(r["un_code"])
+                )
+            except Exception:
+                log.exception("ensure co-owner country %s", r)
+
+    async def ensure_owner_faction_country(self, pid: int, code: str, *, slot_name: str | None = None) -> None:
+        """Ensure a UN-faction country exists and is owned by pid."""
+        code = (code or "UN").upper()
+        now = datetime.now(timezone.utc).isoformat()
+        if code == "UN":
+            name_fa = "سازمان ملل"
+            name_en = "United Nations"
+            leader = "دبیرکل سازمان ملل"
+        else:
+            # UN2 -> سازمان ملل ۲
+            suffix = code[2:] if code.startswith("UN") else code
+            name_fa = f"سازمان ملل {suffix}"
+            name_en = f"United Nations {suffix}"
+            leader = f"دبیرکل سازمان ملل {suffix}"
+        row = await self.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
+        if not row:
+            await self.db.execute(
+                """
+                INSERT INTO ng_countries (
+                    country_code, name_fa, name_en, flag, capital_fa, leader_fa, leader_title_fa,
+                    currency_code, currency_name_fa, npt_member, owner_player_id, treasury, hp, max_hp, is_destroyed, claimed_at, entity_type
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$11,1000,1000,0,$12,'country')
+                """,
+                (
+                    code, name_fa, name_en, "🇺🇳", "نیویورک",
+                    leader, "دبیرکل", "UND", "واحد سازمان ملل",
+                    int(pid), 200_000_000.0, now,
+                ),
+            )
+        else:
+            await self.db.execute(
+                """
+                UPDATE ng_countries
+                SET owner_player_id=$1, is_destroyed=0, name_fa=$2, flag='🇺🇳', leader_fa=$3
+                WHERE country_code=$4
+                """,
+                (int(pid), name_fa, leader, code),
+            )
+        p = await self.db.fetchrow("SELECT * FROM ng_players WHERE player_id=$1", (int(pid),))
+        if not p:
+            await self.db.execute(
+                "INSERT INTO ng_players (player_id, username, display_name, country_code, joined_at, last_seen_at) VALUES ($1,$2,$3,$4,$5,$5)",
+                (int(pid), "owner", name_fa, code, now),
+            )
+        else:
+            cur = p.get("country_code")
+            if not cur or is_un_code(cur):
+                await self.db.execute(
+                    "UPDATE ng_players SET country_code=$1 WHERE player_id=$2",
+                    (code, int(pid)),
+                )
+
+    async def next_un_code(self) -> str:
+        used = {UN_CODE}
+        try:
+            rows = await self.db.fetch("SELECT un_code FROM ng_extra_owners")
+            for r in rows:
+                used.add(str(r["un_code"]).upper())
+        except Exception:
+            pass
+        try:
+            rows = await self.db.fetch(
+                "SELECT country_code FROM ng_countries WHERE country_code LIKE 'UN%'"
+            )
+            for r in rows:
+                used.add(str(r["country_code"]).upper())
+        except Exception:
+            pass
+        n = 2
+        while f"UN{n}" in used:
+            n += 1
+        return f"UN{n}"
+
+    async def add_co_owner(self, actor: int, target_id: int) -> str:
+        if not self.is_primary_owner(actor):
+            raise GameError("فقط مالک اصلی می‌تواند مالک جدید اضافه کند.")
+        target_id = int(target_id)
+        if target_id == int(self.owner_id):
+            raise GameError("مالک اصلی را نمی‌توان دوباره به‌عنوان مالک دوم اضافه کرد.")
+        await self.ensure_owner_tables()
+        await self.refresh_extra_owners_cache()
+        if target_id in self._extra_owner_ids:
+            raise GameError("این کاربر هم‌اکنون مالک دوم است.")
+        # already primary elsewhere?
+        code = await self.next_un_code()
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            """
+            INSERT INTO ng_extra_owners (player_id, un_code, added_by, created_at, active)
+            VALUES ($1,$2,$3,$4,1)
+            """,
+            (target_id, code, int(actor), now),
+        )
+        await self.ensure_owner_faction_country(target_id, code)
+        await self.refresh_extra_owners_cache()
+        await self.admin_log(actor, "add_co_owner", f"{target_id} -> {code}")
+        name = f"سازمان ملل {code[2:]}"
+        return (
+            f"✅ کاربر {target_id} به‌عنوان مالک اضافه شد.\n"
+            f"کشور اختصاصی: {name} ({code})\n"
+            "تمام دسترسی‌های پنل مالک (به‌جز مدیریت مالکان) برای او فعال است."
+        )
+
+    async def remove_co_owner(self, actor: int, target_id: int) -> str:
+        if not self.is_primary_owner(actor):
+            raise GameError("فقط مالک اصلی می‌تواند مالک دوم را حذف کند.")
+        target_id = int(target_id)
+        if target_id == int(self.owner_id):
+            raise GameError("مالک اصلی قابل حذف نیست.")
+        row = await self.db.fetchrow(
+            "SELECT * FROM ng_extra_owners WHERE player_id=$1 AND COALESCE(active,1)=1",
+            (target_id,),
+        )
+        if not row:
+            raise GameError("این کاربر مالک دوم فعال نیست.")
+        code = str(row["un_code"])
+        await self.db.execute(
+            "DELETE FROM ng_extra_owners WHERE player_id=$1", (target_id,)
+        )
+        # free UN country ownership but keep record for history
+        try:
+            await self.db.execute(
+                "UPDATE ng_countries SET owner_player_id=NULL WHERE country_code=$1",
+                (code,),
+            )
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                "UPDATE ng_players SET country_code=NULL WHERE player_id=$1 AND country_code=$2",
+                (target_id, code),
+            )
+        except Exception:
+            pass
+        await self.refresh_extra_owners_cache()
+        await self.admin_log(actor, "remove_co_owner", f"{target_id} {code}")
+        return f"✅ مالک دوم {target_id} ({code}) حذف شد. دسترسی پنل و کشور سازمان ملل او برداشته شد."
+
+    async def owners_panel_text(self) -> str:
+        lines = ["🛡 مدیریت مالکان", ""]
+        lines.append(f"👑 مالک اصلی: {self.owner_id} — سازمان ملل (UN)")
+        rows = await self.db.fetch(
+            "SELECT * FROM ng_extra_owners WHERE COALESCE(active,1)=1 ORDER BY un_code"
+        )
+        if not rows:
+            lines.append("مالک دومی ثبت نشده است.")
+        else:
+            lines.append("مالکان اضافی:")
+            for r in rows:
+                lines.append(
+                    f"• {r['player_id']} — {r['un_code']} (سازمان ملل {str(r['un_code'])[2:]})"
+                )
+        lines.append("")
+        lines.append("فقط مالک اصلی می‌تواند اضافه/حذف کند.")
+        return "\n".join(lines)
+
     def is_un_country(self, code: str | None) -> bool:
-        return (code or "").upper() == UN_CODE
+        return is_un_code(code)
 
     def is_un_force(self, code: str | None, pid: int | None = None) -> bool:
-        """سازمان ملل (مالک) همیشه مجاز به عملیات نظامی/اتمی است."""
+        """سازمان ملل / سازمان ملل ۲... همیشه مجاز به عملیات نظامی/اتمی است."""
         if not self.is_un_country(code):
             return False
         if pid is None:

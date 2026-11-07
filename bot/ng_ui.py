@@ -484,7 +484,10 @@ def register_handlers(bot, app_ctx: dict):
                     await reply(message, "❌ دسترسی مجاز نیست.")
                     return
                 nav_push(pid, "owner")
-                rows = [
+                rows = []
+                if game.is_primary_owner(pid):
+                    rows.append([("➕ افزودن مالک جدید", "ng:owners"), ("🛡 لیست مالکان", "ng:owners")])
+                rows += [
                     [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
                     [("🌐 مدیریت اتحادها", "ng:oally"), ("📊 آمار دعوت", "ng:orefstats")],
                     [("💵 پول همگانی", "ng:ogiveall"), ("💰 پرداخت درآمد روزانه", "ng:odaily")],
@@ -519,6 +522,23 @@ def register_handlers(bot, app_ctx: dict):
             if pid in _pending:
                 st = _pending[pid]
                 kind = st.get("kind")
+                if kind == "add_co_owner" and game.is_primary_owner(pid):
+                    raw = (text or "").strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+                    try:
+                        tid = int(raw.replace(",", "").replace(" ", ""))
+                    except Exception:
+                        await reply(message, "شناسه عددی معتبر بنویس.", ik([cancel_row()]))
+                        return
+                    try:
+                        msg = await game.add_co_owner(pid, tid)
+                        _pending.pop(pid, None)
+                        await reply(message, msg, main_kb(True))
+                    except GameError as e:
+                        await reply(message, f"❌ {e}", ik([cancel_row()]))
+                    except Exception as e:
+                        log.exception("add_co_owner")
+                        await reply(message, f"❌ {e}")
+                    return
                 # cancel pending if user pressed a main menu button
                 if text in MENU_TEXTS or (text.startswith("/") and kind and kind.startswith("ally")):
                     _pending.pop(pid, None)
@@ -3079,6 +3099,46 @@ def register_handlers(bot, app_ctx: dict):
                 )
                 return
 
+
+            if data in ("ng:owners", "ng:o:owners"):
+                if not game.is_primary_owner(pid):
+                    await out("❌ فقط مالک اصلی می‌تواند مالکان را مدیریت کند.")
+                    return
+                try:
+                    body = await game.owners_panel_text()
+                except Exception as e:
+                    body = f"مدیریت مالکان\n{e}"
+                rows = await game.db.fetch(
+                    "SELECT player_id, un_code FROM ng_extra_owners WHERE COALESCE(active,1)=1 ORDER BY un_code"
+                )
+                kb = [[("➕ افزودن با آیدی عددی", "ng:owners:add")]]
+                for r in rows:
+                    kb.append([(f"🗑 حذف {r['player_id']} ({r['un_code']})", f"ng:owners:del:{r['player_id']}")])
+                kb.append(back_row())
+                await out(body, ik(kb))
+                return
+            if data == "ng:owners:add":
+                if not game.is_primary_owner(pid):
+                    await out("❌ فقط مالک اصلی")
+                    return
+                _pending[pid] = {"kind": "add_co_owner"}
+                await out(
+                    "شناسه عددی کاربر را برای افزودن به‌عنوان مالک بنویس.\nمثال: 123456789",
+                    ik([cancel_row()]),
+                )
+                return
+            if data.startswith("ng:owners:del:"):
+                if not game.is_primary_owner(pid):
+                    await out("❌ فقط مالک اصلی می‌تواند حذف کند.")
+                    return
+                try:
+                    tid = int(data.split(":")[-1])
+                    msg = await game.remove_co_owner(pid, tid)
+                    await out(msg)
+                except Exception as e:
+                    await out(f"❌ {e}")
+                return
+
             if data == "ng:o:world":
                 await out(await game.world_status_text(for_owner=owner))
                 return
@@ -3655,7 +3715,10 @@ def register_handlers(bot, app_ctx: dict):
                 await out(text_hp, ik(rows))
                 return
             if data == "ng:opanel":
-                rows = [
+                rows = []
+                if game.is_primary_owner(pid):
+                    rows.append([("➕ افزودن مالک جدید", "ng:owners"), ("🛡 لیست مالکان", "ng:owners")])
+                rows += [
                     [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
                     [("💵 پول همگانی", "ng:ogiveall"), ("💰 پرداخت درآمد روزانه", "ng:odaily")],
                     [("❤️ دیدن HP ها", "ng:ohp"), ("🧬 جان ۲ برابر کشورها", "ng:odblhp")],
