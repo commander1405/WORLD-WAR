@@ -533,6 +533,12 @@ class Game:
         if not rows:
             lines.append("سبد خالی است.")
         lines.append(f"\nجمع: {int(total):,}")
+        try:
+            disc = await self.get_shop_discount_pct()
+            if disc > 0:
+                lines.append(f"🏷 تخفیف سراسری فعال: {int(disc)}٪")
+        except Exception:
+            pass
         if mult > 1:
             lines.append("⚠ قیمت‌ها به‌خاطر نقض پیمان ۱۵٪ افزایش یافته‌اند.")
         return "\n".join(lines), total, items
@@ -2371,28 +2377,56 @@ class Game:
             self._cat[code] = base
 
     async def get_shop_discount_pct(self) -> float:
+        """Global shop discount %. Catalog base prices are never mutated."""
         try:
-            val = await self.get_setting("shop_discount_pct", "0")
-            return max(0.0, min(70.0, float(val or 0)))
+            row = await self.db.fetchrow(
+                "SELECT value FROM ng_bot_settings WHERE key=$1", ("shop_discount_pct",)
+            )
+            val = (row["value"] if row else "0") or "0"
+            return max(0.0, min(70.0, float(val)))
         except Exception:
             return 0.0
 
+    async def _write_setting_raw(self, key: str, value: str) -> None:
+        """Persist setting without min-length checks used for message texts."""
+        value = str(value)
+        row = await self.db.fetchrow("SELECT key FROM ng_bot_settings WHERE key=$1", (key,))
+        if row:
+            await self.db.execute(
+                "UPDATE ng_bot_settings SET value=$1 WHERE key=$2", (value, key)
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO ng_bot_settings (key, value) VALUES ($1,$2)", (key, value)
+            )
+
     async def set_shop_discount(self, actor: int, pct: float) -> str:
+        """Single global runtime discount. Off restores base prices automatically."""
         if not self.is_owner(actor):
             raise GameError("فقط مالک")
         pct = float(pct)
         allowed = {0, 10, 20, 30, 40, 50, 60, 70}
         if pct not in allowed:
             raise GameError("تخفیف باید یکی از ۰/۱۰/۲۰/۳۰/۴۰/۵۰/۶۰/۷۰ باشد.")
-        # only one active — setting replaces previous
-        await self.set_setting(actor, "shop_discount_pct", str(int(pct)))
+        await self._write_setting_raw("shop_discount_pct", str(int(pct)))
         if pct <= 0:
             await self.admin_log(actor, "shop_discount", "off")
-            return "✅ همه تخفیف‌های فروشگاه غیرفعال شد."
+            return (
+                "✅ تخفیف سراسری فروشگاه خاموش شد."
+                + "\n"
+                + "همه کالاها دوباره با قیمت پایه (بدون تخفیف) محاسبه می‌شوند."
+            )
         await self.admin_log(actor, "shop_discount", f"{int(pct)}%")
         return (
-            f"✅ تخفیف سراسری فروشگاه: {int(pct)}٪ فعال شد.\n"
-            "تخفیف قبلی در صورت وجود جایگزین شد (فقط یک تخفیف همزمان)."
+            f"✅ تخفیف سراسری {int(pct)}٪ فعال شد."
+            + "\n"
+            + "قیمت پایه کالاها در دیتابیس تغییر نکرد."
+            + "\n"
+            + "تخفیف فقط هنگام نمایش و خرید اعمال می‌شود."
+            + "\n"
+            + "آیتم‌های جدید و قیمت‌های ویرایش‌شده هم شامل می‌شوند."
+            + "\n"
+            + "فقط یک تخفیف همزمان فعال است."
         )
 
     async def set_item_unit_price(self, actor: int, item_code: str, price: float) -> str:
@@ -2551,9 +2585,16 @@ class Game:
         if not self.is_owner(actor):
             raise GameError("مجاز نیستید")
         value = (value or "").strip()
-        if len(value) < 3:
-            raise GameError("متن خیلی کوتاه است.")
-        if len(value) > 3500:
+        short_ok = {
+            "shop_discount_pct", "war_enabled", "nuclear_enabled",
+            "log_level", "daily_paid_date",
+        }
+        if key not in short_ok:
+            if len(value) < 3:
+                raise GameError("متن خیلی کوتاه است.")
+            if len(value) > 3500:
+                raise GameError("متن خیلی بلند است.")
+        elif len(value) > 3500:
             raise GameError("متن خیلی بلند است.")
         row = await self.db.fetchrow("SELECT key FROM ng_bot_settings WHERE key=$1", (key,))
         if row:

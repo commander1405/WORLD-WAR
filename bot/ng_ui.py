@@ -2459,6 +2459,23 @@ def register_handlers(bot, app_ctx: dict):
                     await out(f"❌ خطا در بخش کاربران: {e}")
                 return
 
+            if data == "ng:o:psearch":
+                if not owner:
+                    await out("❌ فقط مالک")
+                    return
+                _pending[pid] = {"kind": "owner_player_search"}
+                await out(
+                    "🔍 جستجوی بازیکن" + "\n\n"
+                    + "یکی از این‌ها را بفرستید:" + "\n"
+                    + "• @username" + "\n"
+                    + "• نام نمایشی" + "\n"
+                    + "• شناسه عددی" + "\n"
+                    + "• نام یا کد کشور" + "\n\n"
+                    + "مثال: @commander04",
+                    ik([cancel_row()]),
+                )
+                return
+
             if data == "ng:o:world":
                 await out(await game.world_status_text(for_owner=owner))
                 return
@@ -2761,6 +2778,11 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:odiscount":
                 cur = await game.get_shop_discount_pct()
+                status = (
+                    f"تخفیف فعلی: {int(cur)}٪ فعال"
+                    if cur > 0
+                    else "تخفیف فعلی: خاموش (قیمت پایه)"
+                )
                 rows = [
                     [("۱۰٪", "ng:odiscon:10"), ("۲۰٪", "ng:odiscon:20")],
                     [("۳۰٪", "ng:odiscon:30"), ("۴۰٪", "ng:odiscon:40")],
@@ -2769,8 +2791,15 @@ def register_handlers(bot, app_ctx: dict):
                     [("❌ غیرفعال کردن تخفیف", "ng:odiscoff")],
                     back_row(),
                 ]
-                st = f"فعال: {int(cur)}٪" if cur else "هیچ تخفیفی فعال نیست"
-                await out(f"🏷 تخفیف سراسری فروشگاه\nوضعیت: {st}\nفقط یک تخفیف همزمان مجاز است.", ik(rows))
+                await out(
+                    "🏷 تخفیف سراسری فروشگاه" + "\n"
+                    + status + "\n\n"
+                    + "تخفیف روی قیمت پایه همه کالاها اعمال می‌شود." + "\n"
+                    + "قیمت پایه در دیتابیس عوض نمی‌شود." + "\n"
+                    + "آیتم جدید و تغییر قیمت هم شامل تخفیف می‌شوند." + "\n"
+                    + "با خاموش کردن، همه به قیمت پایه برمی‌گردند.",
+                    ik(rows),
+                )
                 return
             if data.startswith("ng:odiscon:"):
                 pct = float(data.split(":")[-1])
