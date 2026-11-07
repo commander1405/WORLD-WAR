@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 TEHRAN = ZoneInfo("Asia/Tehran")
 
+LAW_REGISTER_REWARD = 5_000_000  # نقدی یک‌باره هنگام ثبت قانون
+
 if TYPE_CHECKING:
     from modules.ng.game import Game
 
@@ -407,6 +409,30 @@ class ControlService:
                 "INSERT INTO ng_law_daily (country_code, day, count) VALUES ($1,$2,1)",
                 (code, day),
             )
+        # پاداش نقدی ثبت قانون — یک‌بار به خزانه (جدا از درآمد روزانه)
+        reward = float(LAW_REGISTER_REWARD)
+        c = await self.db.fetchrow(
+            "SELECT treasury FROM ng_countries WHERE country_code=$1", (code,)
+        )
+        if not c:
+            raise ControlError("کشور یافت نشد")
+        new_treas = float(c["treasury"] or 0) + reward
+        await self.db.execute(
+            "UPDATE ng_countries SET treasury=$1 WHERE country_code=$2",
+            (new_treas, code),
+        )
+        try:
+            await self.g.ledger_write(
+                "law_register", reward, pid, from_c=None, to_c=code,
+                reason=f"پاداش ثبت قانون #{lid}",
+            )
+        except Exception:
+            try:
+                await self.g.log_activity(
+                    "economy", f"پاداش ثبت قانون #{lid}: +{int(reward):,}", code, pid
+                )
+            except Exception:
+                pass
         try:
             await self.g._owner_inbox(
                 "law", lid, f"قانون — {await self.g.country_label(code)}", f"{title}\n\n{body}"
@@ -414,8 +440,11 @@ class ControlService:
         except Exception:
             pass
         return (
-            f"✅ قانون «{title}» ثبت شد و برای بررسی سازمان ملل ارسال گردید.\n"
-            f"شناسه: #{lid}"
+            f"✅ قانون «{title}» ثبت شد و برای بررسی سازمان ملل ارسال گردید." + "\n"
+            + f"شناسه: #{lid}" + "\n"
+            + f"💰 پاداش ثبت: +{int(reward):,} به خزانه" + "\n"
+            + f"موجودی جدید خزانه: {int(new_treas):,}" + "\n"
+            + "(این مبلغ جدا از درآمد روزانه است)"
         )
 
     async def review_law(
@@ -460,7 +489,8 @@ class ControlService:
             "law",
             f"📜 قانون «{law['title']}» از {await self.g.country_label(law['country_code'])} تصویب شد.",
         )
-        return f"✅ قانون #{lid} تصویب شد." + (f"\nپاداش درآمد روزانه: {int(income_bonus):,}" if income_bonus else "")
+        return f"✅ قانون #{lid} تصویب شد." + (f"
+📈 پاداش درآمد روزانه (جدا از پاداش نقدی ثبت): {int(income_bonus):,}" if income_bonus else "")
 
     async def pending_laws(self) -> list[dict]:
         return await self.db.fetch(
