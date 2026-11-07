@@ -1440,9 +1440,31 @@ def register_handlers(bot, app_ctx: dict):
 
             msg = getattr(cq, "message", None)
 
-            async def out(text, kb=None):
+            async def out(text, kb=None, *, force_new: bool = False):
                 body = str(text)[:3500]
                 comp = kb if kb is not None else main_kb(owner)
+                if not force_new and msg is not None:
+                    for attr in ("edit_text", "edit", "edit_message_text"):
+                        fn = getattr(msg, attr, None)
+                        if callable(fn):
+                            try:
+                                await fn(body, components=comp)
+                                return
+                            except TypeError:
+                                try:
+                                    await fn(body)
+                                    return
+                                except Exception:
+                                    pass
+                            except Exception:
+                                log.debug("out.%s failed", attr, exc_info=True)
+                    # Bale Message.edit_reply_markup style
+                    try:
+                        if hasattr(msg, "edit_caption"):
+                            await msg.edit_caption(body, components=comp)
+                            return
+                    except Exception:
+                        pass
                 try:
                     if msg is not None:
                         await msg.reply(body, components=comp)
@@ -1504,7 +1526,7 @@ def register_handlers(bot, app_ctx: dict):
                     nav_home(pid)
                     await out("🏠 منوی اصلی", main_kb(owner))
                     return
-                # Re-open previous high-level screens
+                # Re-open previous high-level screens without dumping to home
                 if prev == "country" and code:
                     card = await game.country_card(code)
                     rows = [
@@ -1515,19 +1537,47 @@ def register_handlers(bot, app_ctx: dict):
                     ]
                     await out(card, ik(rows))
                     return
+                if prev == "ctrl" and code:
+                    rows = [
+                        [("📜 تصویب قوانین", "ng:ctrl:laws")],
+                        [("🌊 کنترل تنگه‌ها", "ng:ctrl:strait")],
+                        [("✈️ کنترل پروازها", "ng:ctrl:flight")],
+                        [("🚢 کنترل دریایی", "ng:ctrl:sea")],
+                        [("🌐 کنترل اینترنت", "ng:ctrl:net")],
+                        back_row(),
+                    ]
+                    await out("🏛 کنترل کشور — سیاست داخلی", ik(rows))
+                    return
                 if prev == "eco" and code:
-                    await out(await game.economy_card(code), main_kb(owner))
+                    await out(await game.economy_card(code), ik([back_row()]))
                     return
                 if prev == "shop":
-                    await out("🛒 فروشگاه", ik([
-                        [("📦 دسته‌ها", "ng:shop")],
-                        back_row(),
-                    ]))
+                    cats = {}
+                    for it in game._cat.values():
+                        cats[it.get("category") or "other"] = cats.get(it.get("category") or "other", 0) + 1
+                    rows = []
+                    pair = []
+                    for cat, n in list(cats.items())[:12]:
+                        name = {"ground":"زمینی","air":"هوایی","sea":"دریایی","missile":"موشکی","defense":"پدافند","infra":"زیرساخت","nuclear":"هسته‌ای","mine":"منابع"}.get(cat, cat)
+                        pair.append((f"{name} ({n})", f"ng:shop:{cat}"))
+                        if len(pair) == 2:
+                            rows.append(pair); pair = []
+                    if pair:
+                        rows.append(pair)
+                    rows.append([("🛒 سبد خرید", "ng:cart"), ("✅ تسویه حساب", "ng:checkout")])
+                    rows.append(back_row())
+                    await out("🛒 فروشگاه", ik(rows))
+                    return
+                if prev == "attack":
+                    await out("⚔️ بخش حمله", ik([[("انتخاب هدف", "ng:atk")], back_row()]))
                     return
                 if prev == "owner" and owner:
-                    await out("🛡 پنل مالک — از کیبورد «پنل مالک» وارد شوید.", main_kb(True))
+                    await out("🛡 پنل مالک — از کیبورد «پنل مالک» استفاده کنید.", main_kb(True))
                     return
-                await out(f"بازگشت از بخش قبلی.", main_kb(owner))
+                if prev == "ally":
+                    await out("🤝 اتحادها", ik([[("اتحاد من", "ng:ally")], back_row()]))
+                    return
+                await out("↩️ بازگشت به بخش قبلی.\nاز منوی همان بخش ادامه دهید.", ik([back_row(), [("🏠 خانه", "ng:home")]]))
                 return
 
             # ---- Alliance System 2.0 callbacks ----
@@ -1600,7 +1650,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:ajoin:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.alliances.join(pid, code, int(data.split(":")[-1])))
@@ -1613,7 +1663,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:aleaveyes":
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.alliances.leave(pid, code))
@@ -1748,7 +1798,7 @@ def register_handlers(bot, app_ctx: dict):
 
             if data.startswith("ng:go:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 go = data.split(":")[-1]
                 if go == "inv":
@@ -1832,11 +1882,39 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:add:"):
                 _, _, ic, q = data.split(":")
-                await out(await game.cart_add(pid, ic, float(q)))
+                try:
+                    add_msg = await game.cart_add(pid, ic, float(q))
+                except GameError as e:
+                    await out(f"❌ {e}")
+                    return
+                # stay in shop: show categories + cart summary (edit same message)
+                cats = {}
+                for it in game._cat.values():
+                    cats[it.get("category") or "other"] = cats.get(it.get("category") or "other", 0) + 1
+                rows = []
+                pair = []
+                for cat, n in list(cats.items())[:12]:
+                    name = {"ground":"زمینی","air":"هوایی","sea":"دریایی","missile":"موشکی","defense":"پدافند","infra":"زیرساخت","nuclear":"هسته‌ای","mine":"منابع"}.get(cat, cat)
+                    pair.append((f"{name} ({n})", f"ng:shop:{cat}"))
+                    if len(pair) == 2:
+                        rows.append(pair); pair = []
+                if pair:
+                    rows.append(pair)
+                rows.append([("🛒 سبد خرید", "ng:cart"), ("✅ تسویه حساب", "ng:checkout")])
+                rows.append(back_row())
+                cart_txt = ""
+                try:
+                    if code:
+                        cart_txt, _, items = await game.cart_view(pid, code)
+                except Exception:
+                    cart_txt = ""
+                body = "🛒 فروشگاه\n\n" + str(add_msg) + "\n\n" + (cart_txt or "")
+                nav_push(pid, "shop")
+                await out(body, ik(rows))
                 return
             if data == "ng:cart":
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 text, _, items = await game.cart_view(pid, code)
                 rows = [[(f"🗑 {it['name_fa']}", f"ng:cdel:{it['item_code']}")] for it in items]
@@ -1858,7 +1936,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:checkout":
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.checkout(pid, code))
@@ -1869,14 +1947,14 @@ def register_handlers(bot, app_ctx: dict):
             # market
             if data.startswith("ng:sell:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 _pending[pid] = {"kind": "mkt_qty", "item": data.split(":")[-1]}
                 await out("تعداد برای فروش را بنویسید:")
                 return
             if data.startswith("ng:mbuy:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.market_buy(int(data.split(":")[-1]), code, pid))
@@ -1885,7 +1963,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:mmine":
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 rows_db = await game.db.fetch(
                     "SELECT * FROM ng_market WHERE seller_country=$1 AND active=1", (code,)
@@ -1899,7 +1977,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:mcancel:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.market_cancel(int(data.split(":")[-1]), code))
@@ -1910,7 +1988,7 @@ def register_handlers(bot, app_ctx: dict):
             # trade / aid
             if data == "ng:trade:money":
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
                 rows = [[(f"{c['flag']} {c['name_fa']}", f"ng:aidm:{c['country_code']}")] for c in countries]
@@ -1919,7 +1997,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:trade:army":
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 countries = [c for c in await game.list_countries() if c.get("owner_player_id") and c["country_code"] != code]
                 rows = [[(f"{c['flag']} {c['name_fa']}", f"ng:aida:{c['country_code']}")] for c in countries]
@@ -1928,14 +2006,14 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:aidm:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 _pending[pid] = {"kind": "aid_money_amount", "dst": data.split(":")[-1]}
                 await out("مبلغ کمک را بنویسید:")
                 return
             if data.startswith("ng:aida:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 dst = data.split(":")[-1]
                 inv = await game.db.fetch(
@@ -2322,7 +2400,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:chdef:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 dst = data.split(":")[-1]
                 try:
@@ -2332,7 +2410,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:chasset:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 dst = data.split(":")[-1]
                 try:
@@ -2488,7 +2566,7 @@ def register_handlers(bot, app_ctx: dict):
                     return
             if data == "ng:atkmenu" or data.startswith("ng:atkmenu:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 page = 0
                 if data.startswith("ng:atkmenu:"):
@@ -2520,7 +2598,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:atk:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 ok, reason = await game.can_attack(code)
                 if not ok:
@@ -2549,7 +2627,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:fight:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 _, _, dst, kind, pct = data.split(":")
                 try:
@@ -2559,7 +2637,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:nuke:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 dst = data.split(":")[-1]
                 rows = [[("✅ تأیید حمله اتمی", f"ng:nukego:{dst}"), ("❌ انصراف", "ng:home")]]
@@ -2573,7 +2651,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:nukego:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.attack_nuclear(code, data.split(":")[-1], pid))
@@ -2586,7 +2664,7 @@ def register_handlers(bot, app_ctx: dict):
             # workshop
             if data.startswith("ng:ws:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     if data == "ng:ws:status":
@@ -2608,7 +2686,7 @@ def register_handlers(bot, app_ctx: dict):
 
             if data.startswith("ng:npt:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 if await game.is_group(code):
                     await out("گروهک‌ها امکان NPT ندارند.")
@@ -2620,7 +2698,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:nptgo:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.request_npt_change(code, pid, data.split(":")[-1]))
@@ -3025,8 +3103,9 @@ def register_handlers(bot, app_ctx: dict):
 
             # ---- Country control ----
             if data == "ng:ctrl":
+                nav_push(pid, "ctrl")
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 text_c = await game.control.panel_text(code)
                 rows = [
@@ -3044,7 +3123,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:ctrl:fly:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.control.toggle_flights(code, pid, data.endswith(":1")))
@@ -3057,7 +3136,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:ctrl:sea:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.control.toggle_maritime(code, pid, data.endswith(":1")))
@@ -3070,7 +3149,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:ctrl:net:") and data.count(":") == 3:
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.control.toggle_internet(code, pid, data.endswith(":1")))
@@ -3079,7 +3158,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:ctrl:straits":
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 rows = []
                 straits = await game.control.list_controllable_straits(code)
@@ -3102,7 +3181,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:straitclose:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.control.toggle_strait(code, pid, data.split(":")[-1], True))
@@ -3111,7 +3190,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data.startswith("ng:straitopen:"):
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 try:
                     await out(await game.control.toggle_strait(code, pid, data.split(":")[-1], False))
@@ -3132,7 +3211,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:lawmine":
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 laws = await game.control.active_laws_for(code)
                 if not laws:
@@ -3170,7 +3249,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
             if data == "ng:go:eco":
                 if not code:
-                    await out("کشور ندارید")
+                    await out("هنوز کشوری تحت فرمان شما نیست.")
                     return
                 await out(await game.economy_card(code))
                 return

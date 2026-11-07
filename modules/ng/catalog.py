@@ -134,3 +134,36 @@ def item_meta(code: str) -> dict | None:
             return c
     return None
 
+# PRICE_BALANCE_APPLIED — missiles/drones/defense much cheaper (per-unit combat)
+for _it in CATALOG:
+    _cat = str(_it.get("category") or "")
+    _code = str(_it.get("item_code") or "")
+    if _cat in ("missile", "defense") or _code.startswith("a_drone") or _code.startswith("a_uav") or "drone" in _code:
+        try:
+            _it["unit_price"] = max(50_000, int(float(_it.get("unit_price") or 0) * 0.18))
+        except Exception:
+            pass
+# ensure single atom bomb entry
+_CAT_CODES = {c["item_code"] for c in CATALOG}
+if "item_atom_bomb" in _CAT_CODES:
+    CATALOG[:] = [c for c in CATALOG if c.get("item_code") != "item_atom_bomb"]
+if "d_nuke_shield" not in _CAT_CODES:
+    CATALOG.append({
+        "item_code": "d_nuke_shield",
+        "category": "defense",
+        "name_fa": "پدافند بمب‌اتمی‌گیر",
+        "name_en": "Anti-Nuclear Shield",
+        "origin_fa": "عمومی",
+        "description_fa": "سامانه ویژه رهگیری تهدید هسته‌ای بازی — هر واحد مصرفی نیست ولی نگهداری دارد",
+        "unit_price": 300_000_000,
+        "max_per_order": 5,
+        "power_score": 0.0,
+        "damage": 0.0,
+        "defense": 55.0,
+        "accuracy": 88.0,
+        "technology_level": 5,
+        "consumption_type": "sortie",
+        "daily_income": 0,
+        "maintenance": 25000,
+        "is_building": 0,
+    })

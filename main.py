@@ -24,6 +24,48 @@ for name in ("httpx", "httpcore", "asyncio", "bale", "aiohttp"):
 MAIN_GROUP = "@warworld3"
 
 
+async def queue_nightly_if_needed(game: Game):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    TEHRAN = ZoneInfo("Asia/Tehran")
+    today = datetime.now(TEHRAN).date().isoformat()
+    try:
+        meta = await game.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
+        if (meta or {}).get("last_nightly_date") == today:
+            return
+        text = await game.build_nightly_report()
+        await game.log_activity("nightly_report", text)
+        # also DM owner
+        try:
+            if game.owner_id:
+                await game.log_activity(
+                    "dm_notice",
+                    text[:3500],
+                    None,
+                    int(game.owner_id),
+                )
+        except Exception:
+            log.exception("nightly owner dm")
+        try:
+            await game.db.execute(
+                "UPDATE world_meta SET last_nightly_date=$1 WHERE id=1", (today,)
+            )
+        except Exception:
+            # column may missing — try add via raw
+            try:
+                await game.db.execute("ALTER TABLE world_meta ADD COLUMN last_nightly_date TEXT")
+                await game.db.execute(
+                    "UPDATE world_meta SET last_nightly_date=$1 WHERE id=1", (today,)
+                )
+            except Exception:
+                log.exception("set last_nightly_date")
+        log.info("Nightly report queued for %s", today)
+    except Exception:
+        log.exception("queue_nightly_if_needed")
+
+
+
+
 async def daily_loop(game: Game):
     """Pay daily income only after Tehran midnight; workshop jobs every minute."""
     from datetime import datetime, timedelta, time as dtime
@@ -46,6 +88,7 @@ async def daily_loop(game: Game):
                     log.exception("set last_daily_date")
                 if n:
                     log.info("Daily payout countries=%s date=%s", n, today)
+                    await queue_nightly_if_needed(game)
             elif last != today and now.hour > 0:
                 # Bot was offline at midnight — catch up once after restart
                 n = await game.daily_payout_all()
@@ -57,6 +100,8 @@ async def daily_loop(game: Game):
                     log.exception("set last_daily_date catchup")
                 if n:
                     log.info("Daily payout catch-up countries=%s date=%s", n, today)
+                    await queue_nightly_if_needed(game)
+            await queue_nightly_if_needed(game)
             done = await game.complete_due_jobs()
             if done:
                 log.info("Workshop jobs completed=%s", done)
@@ -84,13 +129,24 @@ async def group_log_loop(game: Game, bot):
                     if hasattr(bot, "send_message"):
                         msg = await bot.send_message(MAIN_GROUP, text[:3500])
                     # Pin UN statements
-                    if kind == "group_pin_statement" and msg is not None:
+                    if kind in ("group_pin_statement", "nightly_report", "group_pin") and msg is not None:
                         mid = getattr(msg, "message_id", None) or getattr(msg, "id", None)
                         if mid is not None:
-                            if hasattr(bot, "pin_chat_message"):
-                                await bot.pin_chat_message(MAIN_GROUP, mid)
-                            elif hasattr(bot, "pin_message"):
-                                await bot.pin_message(MAIN_GROUP, mid)
+                            pinned = False
+                            for method, args in (
+                                ("pin_chat_message", (MAIN_GROUP, mid)),
+                                ("pin_message", (MAIN_GROUP, mid)),
+                                ("pin_chat_message", (MAIN_GROUP, mid, True)),
+                            ):
+                                if hasattr(bot, method):
+                                    try:
+                                        await getattr(bot, method)(*args)
+                                        pinned = True
+                                        break
+                                    except Exception:
+                                        log.exception("pin via %s failed", method)
+                            if not pinned:
+                                log.warning("could not pin message id=%s kind=%s", mid, kind)
                 except Exception:
                     log.exception("group log send failed")
                     await game.log_activity(r.get("kind") or "group_log", text)

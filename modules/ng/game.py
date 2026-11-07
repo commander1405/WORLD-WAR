@@ -56,6 +56,8 @@ class Game:
         for stmt in (
             "ALTER TABLE ng_countries ADD COLUMN double_hp INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ng_countries ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'country'",
+            "ALTER TABLE ng_players ADD COLUMN cash REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE ng_players ADD COLUMN joined_day TEXT",
             "ALTER TABLE world_meta ADD COLUMN last_daily_date TEXT",
             """CREATE TABLE IF NOT EXISTS ng_defense_hits (
                 country_code TEXT PRIMARY KEY,
@@ -469,6 +471,18 @@ class Game:
                 pass
         capital = self.starting_capital(code)
         now = datetime.now(timezone.utc).isoformat()
+        # persistent player cash survives world reset / re-claim
+        try:
+            cash = await self.get_player_cash(int(pid))
+        except Exception:
+            cash = 0.0
+        start_money = float(cash) if cash and float(cash) > 0 else float(capital)
+        if not cash or float(cash) <= 0:
+            try:
+                await self.set_player_cash(int(pid), float(capital))
+            except Exception:
+                pass
+            start_money = float(capital)
         async with self.db.transaction() as tx:
             c = await tx.fetchrow(
                 "SELECT * FROM ng_countries WHERE country_code=$1", (code,)
@@ -477,13 +491,13 @@ class Game:
                 raise GameError("کشور معتبر نیست.")
             if c.get("owner_player_id"):
                 raise GameError("این کشور دارای بازیکن است.")
-            # atomic claim
+            # atomic claim — treasury from persistent cash
             await tx.execute(
                 """
-                UPDATE ng_countries SET owner_player_id=$1, treasury=$2, claimed_at=$3, hp=1000, is_destroyed=0
+                UPDATE ng_countries SET owner_player_id=$1, treasury=$2, claimed_at=$3, hp=1000, max_hp=COALESCE(NULLIF(max_hp,0),1000), is_destroyed=0
                 WHERE country_code=$4 AND owner_player_id IS NULL
                 """,
-                (pid, capital, now, code),
+                (pid, start_money, now, code),
             )
             check = await tx.fetchrow(
                 "SELECT owner_player_id FROM ng_countries WHERE country_code=$1", (code,)
@@ -856,6 +870,11 @@ class Game:
                 label = c2.get("name_fa") or code
                 details.append(f"{label}: +{int(total):,}")
                 oid = c2.get("owner_player_id")
+                try:
+                    if oid:
+                        await self.sync_cash_from_country(code)
+                except Exception:
+                    log.exception("sync cash after daily %s", code)
                 await self.log_activity(
                     "daily",
                     f"{'پرداخت دستی مالک' if force else 'درآمد روزانه'}: {int(total):,} (پایه {int(base):,} × {mod:.2f})",
@@ -1244,12 +1263,12 @@ class Game:
         base = raw / (raw + 55.0) * 0.88 if raw > 0 else 0.0
         base = min(self.DEFENSE_COVER_CAP, max(0.0, base))
         kind_factor = {
-            "air": 1.05,
-            "ground": 0.82,
-            "sea": 0.70,
-            "nuclear": 0.35,
-            "missile": 1.0,
-        }.get(attack_kind, 0.75)
+            "air": 1.08,
+            "ground": 0.85,
+            "sea": 0.75,
+            "nuclear": 0.72,
+            "missile": 1.12,
+        }.get(attack_kind, 0.8)
         disable = await self.active_cyber_disable_ratio(code)
         bonus = 0.0
         try:
@@ -1739,7 +1758,10 @@ class Game:
                 break
 
             raw = (ap - dp * 0.55) * 0.35 + 15
-            damage = max(5.0, min(220.0, raw))
+            # percent intensity must matter, but avoid instant wipe
+            intensity = max(0.10, min(1.0, float(percent) / 100.0))
+            raw = raw * (0.45 + 0.55 * intensity)
+            damage = max(5.0, min(160.0, raw))
             cover, def_meta = await self.defense_coverage(defender, kind)
             raw_damage = float(damage)
             intercepted = raw_damage * cover
@@ -1868,6 +1890,26 @@ class Game:
                         "UPDATE ng_players SET country_code=NULL, destroy_cooldown_until=$1 WHERE player_id=$2",
                         (until, int(prev)),
                     )
+                    try:
+                        rem_c = await tx.fetchrow(
+                            "SELECT treasury FROM ng_countries WHERE country_code=$1", (defender,)
+                        )
+                        remain = float((rem_c or {}).get("treasury") or 0)
+                        await tx.execute(
+                            "UPDATE ng_players SET cash=$1 WHERE player_id=$2",
+                            (max(0.0, remain), int(prev)),
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await self.log_activity(
+                            "dm_notice",
+                            f"💀 کشور شما نابود شد.\nپول پایدار حساب حفظ شد. محدودیت ۳۰ دقیقه‌ای فعال است.",
+                            defender,
+                            int(prev),
+                        )
+                    except Exception:
+                        pass
 
         atk_name = await self.country_label(attacker)
         def_name = await self.country_label(defender)
@@ -1959,9 +2001,8 @@ class Game:
                 "INSERT INTO ng_statements (id, country_code, player_id, body, status, created_at, reviewed_at) VALUES ($1,$2,$3,$4,'approved',$5,$5)",
                 (sid, code, pid, body[:2000], now),
             )
-            text = "🇺🇳 بیانیه رسمی سازمان ملل\n\n" + body[:2000]
             text = "🇺🇳 بیانیه رسمی سازمان ملل" + chr(10) + chr(10) + body[:2000]
-            await self.broadcast_log("statement", text)
+            # only one group delivery path (pin queue) — avoid double post
             await self.log_activity("group_pin_statement", text, UN_CODE, pid)
             return "✅ بیانیه سازمان ملل منتشر شد و برای پین در گروه اصلی صف شد."
         await self.db.execute(
@@ -2016,6 +2057,36 @@ class Game:
     # ---------- admin ----------
     def is_owner(self, pid: int) -> bool:
         return self.owner_id and int(pid) == int(self.owner_id)
+
+
+    async def get_player_cash(self, pid: int) -> float:
+        p = await self.db.fetchrow("SELECT cash FROM ng_players WHERE player_id=$1", (int(pid),))
+        if not p:
+            return 0.0
+        try:
+            return float(p.get("cash") or 0)
+        except Exception:
+            return 0.0
+
+    async def set_player_cash(self, pid: int, amount: float) -> None:
+        amount = max(0.0, float(amount))
+        await self.db.execute(
+            "UPDATE ng_players SET cash=$1 WHERE player_id=$2",
+            (amount, int(pid)),
+        )
+
+    async def sync_cash_from_country(self, code: str) -> None:
+        """Mirror country treasury into owner persistent cash."""
+        c = await self.db.fetchrow(
+            "SELECT owner_player_id, treasury FROM ng_countries WHERE country_code=$1", (code,)
+        )
+        if not c or not c.get("owner_player_id"):
+            return
+        try:
+            await self.set_player_cash(int(c["owner_player_id"]), float(c.get("treasury") or 0))
+        except Exception:
+            log.exception("sync_cash_from_country %s", code)
+
 
     def is_un_country(self, code: str | None) -> bool:
         return (code or "").upper() == UN_CODE
@@ -2176,6 +2247,10 @@ class Game:
             await self.admin_log(actor, "treasury", f"{code} {delta:+.0f} {before:.0f}->{after:.0f} {reason}")
         except Exception:
             pass
+        try:
+            await self.sync_cash_from_country(code)
+        except Exception:
+            log.exception("sync cash after adjust_treasury %s", code)
         return {
             "code": code,
             "before": before,
@@ -2303,6 +2378,14 @@ class Game:
             raise GameError("مجاز نیستید")
         if confirm_phrase.strip() != "ریست کامل جهان":
             raise GameError("عبارت تأیید نادرست است.")
+        # Preserve player cash + referral graph across world reset
+        saved_players = await self.db.fetch(
+            "SELECT player_id, username, display_name, cash, is_banned, ban_reason FROM ng_players"
+        )
+        try:
+            saved_refs = await self.db.fetch("SELECT * FROM ng_referrals")
+        except Exception:
+            saved_refs = []
         tables = [
             "ng_cart","ng_market","ng_peace","ng_statements","ng_daily_payouts",
             "ng_activity","ng_admin_log","ng_buildings","ng_inventory","ng_players",
@@ -2310,7 +2393,10 @@ class Game:
         ]
         async with self.db.transaction() as tx:
             for t in tables:
-                await tx.execute(f"DELETE FROM {t}")
+                try:
+                    await tx.execute(f"DELETE FROM {t}")
+                except Exception:
+                    pass
             await tx.execute(
                 "UPDATE ng_countries SET owner_player_id=NULL, treasury=0, daily_income=0, daily_expense=0, hp=1000, is_destroyed=0, peace_penalty_until=NULL, claimed_at=NULL WHERE country_code<>$1",
                 (UN_CODE,),
@@ -2324,9 +2410,48 @@ class Game:
                 "UPDATE world_meta SET started_at=$1, reset_count=reset_count+1, war_enabled=1, nuclear_enabled=0 WHERE id=1",
                 (now,),
             )
+            for p in saved_players:
+                try:
+                    await tx.execute(
+                        """
+                        INSERT INTO ng_players (player_id, username, display_name, country_code, is_banned, ban_reason, cash, joined_at)
+                        VALUES ($1,$2,$3,NULL,$4,$5,$6,$7)
+                        """,
+                        (
+                            int(p["player_id"]),
+                            p.get("username"),
+                            p.get("display_name"),
+                            int(p.get("is_banned") or 0),
+                            p.get("ban_reason"),
+                            float(p.get("cash") or 0),
+                            now,
+                        ),
+                    )
+                except Exception:
+                    pass
+            for r in saved_refs:
+                try:
+                    cols = [k for k in r.keys()]
+                    # best-effort restore whole row via common schema
+                    await tx.execute(
+                        "INSERT INTO ng_referrals (referrer_id, invitee_id, code, created_at, rewarded) VALUES ($1,$2,$3,$4,$5)",
+                        (
+                            r.get("referrer_id") or r.get("inviter_id"),
+                            r.get("invitee_id") or r.get("player_id"),
+                            r.get("code") or r.get("ref_code") or "",
+                            r.get("created_at") or now,
+                            int(r.get("rewarded") or 1),
+                        ),
+                    )
+                except Exception:
+                    pass
         await self.ensure_un_country()
-        await self.admin_log(actor, "full_reset", "world wiped")
-        return "🔴 جهان به‌طور کامل ریست شد. کشورها آزاد هستند. سازمان ملل برای مالک باقی ماند."
+        await self.admin_log(actor, "full_reset", "world wiped keep cash+refs")
+        return (
+            "🔴 جهان ریست شد.\n"
+            "تجهیزات و کشورها آزاد شدند.\n"
+            "پول پایدار بازیکنان و دعوت‌ها حفظ شد."
+        )
 
     async def admin_log(self, actor: int, action: str, detail: str) -> None:
         nid = await self.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_admin_log")
@@ -4106,11 +4231,22 @@ class Game:
                     break
                 if not consumed:
                     raise GameError("بمب اتم در انبار ندارید.")
-            pct = random.uniform(0.25, 0.35)
-            damage = float(d["max_hp"]) * pct
+            pct = random.uniform(0.20, 0.38)
+            damage = float(d.get("max_hp") or d.get("hp") or 1000) * pct
             cover, _ = await self.defense_coverage(defender, "nuclear")
+            # anti-nuke shield boosts intercept hard
+            try:
+                inv_s = await tx.fetchrow(
+                    "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code='d_nuke_shield'",
+                    (defender,),
+                )
+                shield_q = float((inv_s or {}).get("quantity") or 0)
+                if shield_q > 0:
+                    cover = min(0.92, cover + 0.12 * min(5.0, shield_q))
+            except Exception:
+                pass
             intercepted = damage * cover
-            damage = max(damage * 0.5, damage - intercepted)  # nuclear still hurts a lot
+            damage = max(damage * 0.15, damage - intercepted)
             new_hp = max(0.0, float(d["hp"]) - damage)
             await tx.execute(
                 "UPDATE ng_countries SET hp=$1 WHERE country_code=$2", (new_hp, defender)
@@ -4778,6 +4914,129 @@ class Game:
             await tx.execute("DELETE FROM ng_buildings WHERE country_code=$1", (country_code,))
         except Exception:
             pass
+
+
+    async def build_nightly_report(self) -> str:
+        """Tehran daily league-style report — real DB stats only."""
+        from datetime import datetime, timedelta
+        now = datetime.now(TEHRAN)
+        day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_iso = day0.isoformat()
+        # attacks today
+        attacks = await self.db.fetch(
+            "SELECT summary, country_code, player_id, created_at FROM ng_activity WHERE kind='attack' ORDER BY id DESC LIMIT 200"
+        )
+        atk_lines = []
+        for a in attacks[:15]:
+            atk_lines.append("• " + str(a.get("summary") or "")[:120])
+        # top buyers
+        buys = await self.db.fetch(
+            "SELECT player_id, COUNT(*) AS n FROM ng_activity WHERE kind IN ('buy','checkout','shop') GROUP BY player_id ORDER BY n DESC LIMIT 5"
+        )
+        # alliances
+        allies = []
+        try:
+            allies = await self.db.fetch(
+                "SELECT name, member_count, treasury FROM ng_alliances WHERE COALESCE(active,1)=1 ORDER BY member_count DESC LIMIT 10"
+            )
+        except Exception:
+            try:
+                allies = await self.db.fetch("SELECT * FROM ng_alliances LIMIT 10")
+            except Exception:
+                allies = []
+        top_ally_mem = allies[0] if allies else None
+        top_ally_treas = None
+        try:
+            ranked = sorted(allies, key=lambda x: -float(x.get("treasury") or 0))
+            top_ally_treas = ranked[0] if ranked else None
+        except Exception:
+            pass
+        # richest players by country treasury
+        rich = await self.db.fetch(
+            """
+            SELECT c.name_fa, c.treasury, c.owner_player_id, c.flag
+            FROM ng_countries c
+            WHERE c.owner_player_id IS NOT NULL AND COALESCE(c.is_destroyed,0)=0
+            ORDER BY c.treasury DESC LIMIT 5
+            """
+        )
+        # military value
+        inv = await self.db.fetch(
+            """
+            SELECT i.country_code, i.item_code, i.quantity, c.name_fa, c.owner_player_id, c.flag
+            FROM ng_inventory i
+            JOIN ng_countries c ON c.country_code=i.country_code
+            WHERE c.owner_player_id IS NOT NULL AND COALESCE(c.is_destroyed,0)=0 AND i.quantity>0
+            """
+        )
+        mil = {}
+        for r in inv:
+            meta = self._cat.get(r["item_code"]) or {}
+            if str(meta.get("category") or "") in ("infra", "mine") or int(meta.get("is_building") or 0):
+                continue
+            price = float(meta.get("unit_price") or 0)
+            key = r["country_code"]
+            mil[key] = mil.get(key, 0.0) + price * float(r["quantity"] or 0)
+        mil_rank = sorted(mil.items(), key=lambda x: -x[1])[:5]
+        # overall score = treasury + 0.4*military
+        overall = []
+        for c in rich:
+            code = None
+            # need code - query again
+            pass
+        countries = await self.db.fetch(
+            "SELECT country_code, name_fa, treasury, owner_player_id, flag FROM ng_countries WHERE owner_player_id IS NOT NULL AND COALESCE(is_destroyed,0)=0"
+        )
+        for c in countries:
+            code = c["country_code"]
+            score = float(c.get("treasury") or 0) + 0.4 * float(mil.get(code) or 0)
+            overall.append((score, c))
+        overall.sort(key=lambda x: -x[0])
+        # new players today
+        new_p = 0
+        try:
+            rows = await self.db.fetch("SELECT player_id, joined_at, last_seen_at FROM ng_players")
+            for r in rows:
+                js = str(r.get("joined_at") or r.get("last_seen_at") or "")
+                if js.startswith(now.strftime("%Y-%m-%d")) or day_iso[:10] in js:
+                    new_p += 1
+        except Exception:
+            pass
+        lines = [
+            "🌙 گزارش شبانه‌ی جهان — " + now.strftime("%Y/%m/%d"),
+            "━━━━━━━━━━━━━━",
+            "⚔️ حملات امروز:",
+        ]
+        lines += atk_lines[:12] if atk_lines else ["• حمله‌ای ثبت نشده"]
+        lines.append("")
+        lines.append("🛒 بیشترین خرید (تعداد تراکنش):")
+        if buys:
+            for b in buys:
+                lines.append(f"• بازیکن {b.get('player_id')}: {b.get('n')} خرید")
+        else:
+            lines.append("• داده‌ای نیست")
+        lines.append("")
+        if top_ally_mem:
+            lines.append(f"🤝 اتحاد با بیشترین عضو: {top_ally_mem.get('name') or '—'} ({top_ally_mem.get('member_count') or '?'} نفر)")
+        if top_ally_treas:
+            lines.append(f"🏦 اتحاد با بیشترین خزانه: {top_ally_treas.get('name') or '—'} — {int(float(top_ally_treas.get('treasury') or 0)):,}")
+        lines.append("")
+        lines.append("💰 پول‌دارترین کشورها:")
+        for c in rich[:5]:
+            lines.append(f"• {c.get('flag') or ''} {c.get('name_fa')}: {int(float(c.get('treasury') or 0)):,}")
+        lines.append("")
+        lines.append("🪖 قدرتمندترین از نظر تجهیزات:")
+        for code, val in mil_rank[:5]:
+            nm = await self.country_label(code)
+            lines.append(f"• {nm}: ارزش تقریبی {int(val):,}")
+        lines.append("")
+        if overall:
+            best = overall[0][1]
+            lines.append(f"🏆 بهترین کلی: {best.get('flag') or ''} {best.get('name_fa')} (امتیاز ترکیبی)")
+        lines.append(f"🆕 بازیکن جدید امروز: {new_p}")
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append("این گزارش هر شب ساعت ۰۰:۰۰ تهران ارسال و پین می‌شود.")
+        return chr(10).join(lines)
 
     async def clear_destroy_cooldown(self, actor: int, target_id: int) -> str:
         """Owner removes the 30-minute post-destroy claim restriction."""
