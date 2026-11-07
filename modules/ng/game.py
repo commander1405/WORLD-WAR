@@ -678,6 +678,10 @@ class Game:
             await tx.execute("DELETE FROM ng_cart WHERE player_id=$1", (pid,))
         await self.recalc_income(country_code)
         await self.log_activity("buy", f"خرید به مبلغ {int(total):,}", country_code, pid)
+        try:
+            await self.sync_cash_from_country(country_code)
+        except Exception:
+            log.exception("sync cash after checkout")
         label = await self.country_label(country_code)
         await self.broadcast_log("buy", f"🛒 کشور {label} یک خرید جدید انجام داد.\nمبلغ: {int(total):,}")
         return f"✅ خرید موفق\nمبلغ: {int(total):,}"
@@ -2035,22 +2039,20 @@ class Game:
             c = await self.db.fetchrow(
                 "SELECT * FROM ng_countries WHERE country_code=$1", (s["country_code"],)
             )
-            is_un = (s["country_code"] == UN_CODE) or (c and c.get("country_code") == UN_CODE)
+            is_un = (s["country_code"] == UN_CODE) or ((c or {}).get("country_code") == UN_CODE)
             if is_un:
-                text = (
-                    f"🇺🇳 بیانیه رسمی سازمان ملل\n\n"
-                    f"{s['body']}"
-                )
-            else:
-                text = (
-                    f"📜 بیانیه رسمی کشور {c['name_fa']}\n"
-                    f"با رهبری {c['leader_fa']}\n\n"
-                    f"او در پی سخنرانی خود گفت:\n{s['body']}"
-                )
+                text = "🇺🇳 بیانیه رسمی سازمان ملل" + chr(10) + chr(10) + str(s["body"])
+                # one path only: group_log_loop sends and pins
+                await self.log_activity("group_pin_statement", text, UN_CODE, actor)
+                return "✅ بیانیه سازمان ملل منتشر و برای پین صف شد."
+            name = (c or {}).get("name_fa") or s["country_code"]
+            leader = (c or {}).get("leader_fa") or "رهبر"
+            text = (
+                "📜 بیانیه رسمی کشور " + str(name) + chr(10)
+                + "با رهبری " + str(leader) + chr(10) + chr(10)
+                + "او در پی سخنرانی خود گفت:" + chr(10) + str(s["body"])
+            )
             await self.broadcast_log("statement", text)
-            # queue pin for UN statements
-            if is_un:
-                await self.log_activity("group_pin_statement", text)
             return text
         return "بیانیه رد شد."
 

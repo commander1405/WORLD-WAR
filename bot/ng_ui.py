@@ -43,6 +43,7 @@ BTN_CTRL = "🏛 کنترل کشور"
 BTN_TREATY = "⚖ پیمان‌ها"
 BTN_WALLET = "💰 کیف پول"
 BTN_DONATE = "💎 حمایت مالی"
+BTN_MORE = "📂 منوی بیشتر"
 
 _pending: dict[int, dict] = {}
 
@@ -70,19 +71,14 @@ def nav_back(pid: int) -> str | None:
 
 
 def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
-    """Compact main menu — owner button only for owner."""
+    """Compact main menu — essentials first; secondary in «منوی بیشتر»."""
     kb = MenuKeyboardMarkup()
     rows = [
-        [BTN_MY, BTN_ECO],
-        [BTN_SHOP, BTN_INV],
-        [BTN_WORKSHOP, BTN_ATTACK],
-        [BTN_ALLY, BTN_DIPLO],
-        [BTN_MKT, BTN_TRADE],
-        [BTN_TREATY, BTN_WALLET],
-        [BTN_STMT, BTN_WORLD],
-        [BTN_REPORT, BTN_GUIDE],
-        [BTN_REF, BTN_DONATE],
-        [BTN_PICK, BTN_ABOUT],
+        [BTN_GUIDE, BTN_MY],
+        [BTN_SHOP, BTN_ATTACK],
+        [BTN_ECO, BTN_INV],
+        [BTN_ALLY, BTN_WORLD],
+        [BTN_PICK, BTN_MORE],
     ]
     if is_owner:
         rows.append([BTN_OWNER])
@@ -111,6 +107,27 @@ def ik(rows: list) -> InlineKeyboardMarkup:
     return kb
 
 
+
+def more_menu_rows():
+    """Secondary features — kept off the main keyboard."""
+    return [
+        [("🏭 کارگاه", "ng:more:workshop"), ("🤝 روابط خارجی", "ng:more:diplo")],
+        [("🌐 بازار آزاد", "ng:more:mkt"), ("🚢 تجارت", "ng:more:trade")],
+        [("⚖ پیمان‌ها", "ng:more:treaty"), ("💰 کیف پول", "ng:more:wallet")],
+        [("📜 بیانیه", "ng:more:stmt"), ("📊 گزارش‌ها", "ng:more:report")],
+        [("🎁 دعوت", "ng:more:ref"), ("💎 حمایت مالی", "ng:more:donate")],
+        [("ℹ️ درباره ما", "ng:more:about")],
+        back_row(),
+    ]
+
+
+def more_menu_text() -> str:
+    return (
+        "📂 منوی بیشتر\n\n"
+        "اینجا امکانات جانبی قرار دارند تا صفحهٔ اصلی خلوت بماند.\n"
+        "یکی را انتخاب کنید:"
+    )
+
 def back_row():
     """Back goes to previous screen; Home goes to main menu."""
     return [("🔙 بازگشت", "ng:back"), ("🏠 خانه", "ng:home")]
@@ -123,7 +140,7 @@ def cancel_row():
 MENU_TEXTS = {
     BTN_MY, BTN_ECO, BTN_SHOP, BTN_INV, BTN_MKT, BTN_TRADE, BTN_DIPLO,
     BTN_PEACE, BTN_ATTACK, BTN_STMT, BTN_WORLD, BTN_REPORT, BTN_PICK,
-    BTN_OWNER, BTN_WORKSHOP, BTN_ABOUT, BTN_GUIDE, BTN_REF, BTN_ALLY, BTN_CTRL, BTN_TREATY, BTN_WALLET, BTN_DONATE,
+    BTN_OWNER, BTN_WORKSHOP, BTN_ABOUT, BTN_GUIDE, BTN_REF, BTN_ALLY, BTN_CTRL, BTN_TREATY, BTN_WALLET, BTN_DONATE, BTN_MORE,
     "/start", "شروع", "منو", "menu", "/admin", "/owner", "/panel",
 }
 
@@ -763,7 +780,7 @@ def register_handlers(bot, app_ctx: dict):
                 if kind == "statement":
                     _pending.pop(pid, None)
                     if not code:
-                        await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                        await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                         return
                     try:
                         msg = await game.submit_statement(code, pid, text)
@@ -1063,6 +1080,12 @@ def register_handlers(bot, app_ctx: dict):
                 await reply(message, start_msg, main_kb(owner))
                 return
 
+
+            if text == BTN_MORE:
+                nav_push(pid, "more")
+                await reply(message, more_menu_text(), ik(more_menu_rows()))
+                return
+
             if text == BTN_PICK:
                 if code:
                     await reply(message, "شما هم‌اکنون یک کشور/گروهک دارید.", main_kb(owner))
@@ -1095,6 +1118,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             if text == BTN_MY:
+                nav_push(pid, "country")
                 if not code:
                     await reply(message, "ابتدا «انتخاب کشور» را بزنید.", main_kb(owner))
                     return
@@ -1110,8 +1134,9 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             if text == BTN_CTRL:
+                nav_push(pid, "ctrl")
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 try:
                     text_c = await game.control.panel_text(code)
@@ -1129,8 +1154,9 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             if text == BTN_ECO:
+                nav_push(pid, "eco")
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 nav_push(pid, "eco")
                 await reply(message, await game.economy_card(code), main_kb(owner))
@@ -1153,8 +1179,9 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             if text == BTN_SHOP:
+                nav_push(pid, "shop")
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 try:
                     await game.ensure_shop_catalog()
@@ -1182,7 +1209,7 @@ def register_handlers(bot, app_ctx: dict):
 
             if text == BTN_INV:
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 inv = await game.db.fetch(
                     "SELECT * FROM ng_inventory WHERE country_code=$1 AND quantity>0 ORDER BY item_code",
@@ -1198,7 +1225,7 @@ def register_handlers(bot, app_ctx: dict):
 
             if text == BTN_MKT:
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 listings = await game.market_list(0)
                 rows = []
@@ -1215,7 +1242,7 @@ def register_handlers(bot, app_ctx: dict):
 
             if text == BTN_TRADE:
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 rows = [
                     [("💰 کمک مالی", "ng:trade:money"), ("📦 کمک نظامی", "ng:trade:army")],
@@ -1226,7 +1253,7 @@ def register_handlers(bot, app_ctx: dict):
 
             if text == BTN_DIPLO:
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 rows = [
                     [("💰 کمک مالی", "ng:trade:money"), ("📦 کمک نظامی", "ng:trade:army")],
@@ -1246,8 +1273,9 @@ def register_handlers(bot, app_ctx: dict):
 
 
             if text == BTN_ATTACK:
+                nav_push(pid, "attack")
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 meta = await game.db.fetchrow("SELECT war_enabled FROM world_meta WHERE id=1")
                 war_on = bool(meta and int(meta.get("war_enabled") or 0))
@@ -1281,19 +1309,20 @@ def register_handlers(bot, app_ctx: dict):
 
             if text == BTN_STMT:
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 _pending[pid] = {"kind": "statement"}
                 await reply(message, "متن بیانیه رسمی را بنویسید و ارسال کنید:", main_kb(owner))
                 return
 
             if text == BTN_WORLD:
+                nav_push(pid, "world")
                 await reply(message, await game.world_status_text(for_owner=owner), main_kb(owner))
                 return
 
             if text == BTN_REPORT:
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 rows = await game.db.fetch(
                     "SELECT * FROM ng_activity WHERE country_code=$1 ORDER BY id DESC", (code,)
@@ -1307,7 +1336,7 @@ def register_handlers(bot, app_ctx: dict):
 
             if text == BTN_WORKSHOP:
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 await game.complete_due_jobs(code)
                 rows = [
@@ -1344,8 +1373,9 @@ def register_handlers(bot, app_ctx: dict):
 
 
             if text == BTN_ALLY:
+                nav_push(pid, "ally")
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 mem = await game.alliances.member_of(code)
                 if mem:
@@ -1385,6 +1415,7 @@ def register_handlers(bot, app_ctx: dict):
                 return
 
             if text == BTN_GUIDE:
+                nav_push(pid, "guide")
                 rows = guide_menu_rows()
                 await reply(
                     message,
@@ -1395,7 +1426,7 @@ def register_handlers(bot, app_ctx: dict):
 
             if text == BTN_TREATY:
                 if not code:
-                    await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await reply(message, "هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 c = await game.db.fetchrow("SELECT * FROM ng_countries WHERE country_code=$1", (code,))
                 st = "عضو NPT" if int(c["npt_member"]) else "غیرعضو NPT"
@@ -1519,6 +1550,114 @@ def register_handlers(bot, app_ctx: dict):
                     await out("🏠 منوی اصلی", main_kb(owner))
                 return
 
+
+            if data == "ng:more" or data.startswith("ng:more:"):
+                nav_push(pid, "more")
+                key = data.split(":")[-1] if data.startswith("ng:more:") else ""
+                if key in ("", "home", "more"):
+                    await out(more_menu_text(), ik(more_menu_rows()))
+                    return
+                if key == "workshop":
+                    if not code:
+                        await out("هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.")
+                        return
+                    nav_push(pid, "workshop")
+                    rows = [
+                        [("📊 وضعیت کارگاه", "ng:ws:status")],
+                        [("⚛ تولید اورانیوم", "ng:ws:uranium"), ("🔬 فناوری صلح‌آمیز", "ng:ws:research")],
+                        [("⬆️ ارتقای کارگاه", "ng:ws:upgrade")],
+                        [("💣 ساخت بمب اتم", "ng:ws:bomb")],
+                        back_row(),
+                    ]
+                    await out("🏭 کارگاه — تولید و فناوری", ik(rows))
+                    return
+                if key == "diplo":
+                    nav_push(pid, "diplo")
+                    rows = [
+                        [("کشورها", "ng:diplo:list")],
+                        [("کمک مالی", "ng:aid:money"), ("کمک نظامی", "ng:aid:army")],
+                        back_row(),
+                    ]
+                    await out("🤝 روابط خارجی", ik(rows))
+                    return
+                if key == "mkt":
+                    if not code:
+                        await out("هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.")
+                        return
+                    nav_push(pid, "mkt")
+                    await out("🌐 بازار آزاد", ik([[("📋 آگهی‌ها", "ng:mkt:0")], back_row()]))
+                    return
+                if key == "trade":
+                    nav_push(pid, "trade")
+                    await out("🚢 تجارت جهانی", ik([back_row()]))
+                    return
+                if key == "treaty":
+                    nav_push(pid, "treaty")
+                    await out("⚖ پیمان‌ها و توافق‌ها", ik([[("🕊 مدیریت صلح", "ng:peace:menu")], back_row()]))
+                    return
+                if key == "wallet":
+                    nav_push(pid, "wallet")
+                    try:
+                        txt = await game.legendary.wallet_text(pid)
+                    except Exception:
+                        txt = "💰 کیف پول لجندری"
+                    rows = [
+                        [("💳 واریز به کیف پول", "ng:wallet_deposit")],
+                        [("🎁 فروشگاه لجندری", "ng:legshop")],
+                        [("🎁 استفاده از آیتم", "ng:leguse")],
+                        back_row(),
+                    ]
+                    await out(txt, ik(rows))
+                    return
+                if key == "stmt":
+                    nav_push(pid, "stmt")
+                    _pending[pid] = {"kind": "statement"}
+                    await out("📜 متن بیانیه را بنویسید (حداقل ۵۰ کاراکتر). برای لغو: لغو", ik([cancel_row()]))
+                    return
+                if key == "report":
+                    nav_push(pid, "report")
+                    try:
+                        txt = await game.world_status_text(for_owner=owner)
+                    except Exception:
+                        txt = "📊 گزارش جهان"
+                    await out(txt, ik([back_row()]))
+                    return
+                if key == "ref":
+                    nav_push(pid, "ref")
+                    try:
+                        txt = await game.referral_panel_text(pid)
+                    except Exception as e:
+                        log.exception("referral more")
+                        txt = "🎁 سیستم دعوت — " + str(e)
+                    await out(txt, ik([back_row()]))
+                    return
+                if key == "donate":
+                    nav_push(pid, "donate")
+                    try:
+                        txt = await game.donations.intro_text()
+                    except Exception:
+                        txt = "💎 حمایت مالی از توسعه WORLD WAR"
+                    rows = [
+                        [("✅ ثبت درخواست حمایت", "ng:donate:new")],
+                        back_row(),
+                    ]
+                    await out(txt, ik(rows))
+                    return
+                if key == "about":
+                    txt = None
+                    try:
+                        row = await game.db.fetchrow(
+                            "SELECT value FROM ng_bot_settings WHERE key=$1",
+                            ("about_message",),
+                        )
+                        txt = (row or {}).get("value")
+                    except Exception:
+                        pass
+                    await out(str(txt or "ℹ️ WORLD WAR — بازی کشور‌داری چندنفره در بله"), ik([back_row()]))
+                    return
+                await out(more_menu_text(), ik(more_menu_rows()))
+                return
+
             if data == "ng:back":
                 prev = nav_back(pid)
                 _pending.pop(pid, None)
@@ -1574,6 +1713,9 @@ def register_handlers(bot, app_ctx: dict):
                 if prev == "owner" and owner:
                     await out("🛡 پنل مالک — از کیبورد «پنل مالک» استفاده کنید.", main_kb(True))
                     return
+                if prev == "more":
+                    await out(more_menu_text(), ik(more_menu_rows()))
+                    return
                 if prev == "ally":
                     await out("🤝 اتحادها", ik([[("اتحاد من", "ng:ally")], back_row()]))
                     return
@@ -1583,7 +1725,7 @@ def register_handlers(bot, app_ctx: dict):
             # ---- Alliance System 2.0 callbacks ----
             if data == "ng:acreate":
                 if not code:
-                    await out("ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await out("هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 if await game.alliances.member_of(code):
                     await out("شما هم‌اکنون عضو یک اتحاد هستید.", main_kb(owner))
@@ -1598,7 +1740,7 @@ def register_handlers(bot, app_ctx: dict):
                 st = dict(_pending.get(pid) or {})
                 if not code:
                     _pending.pop(pid, None)
-                    await out("ابتدا کشور انتخاب کنید.", main_kb(owner))
+                    await out("هنوز کشوری نداری — از «🗺 انتخاب کشور» شروع کن.", main_kb(owner))
                     return
                 name = (st.get("name") or "").strip()
                 if not name or st.get("kind") not in ("ally_confirm", "ally_cap", None) and not st.get("max_members"):
