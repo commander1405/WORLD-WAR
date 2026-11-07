@@ -2581,6 +2581,169 @@ class Game:
         await self.admin_log(actor, "give_item", f"{code} {item} {qty}")
         return "✅ تجهیزات اضافه شد."
 
+
+    def _normalize_eq_name(self, s: str) -> str:
+        s = str(s or "").strip().lower()
+        s = s.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+        for a, b in (
+            ("\u200c", ""), ("‌", ""), ("ي", "ی"), ("ك", "ک"), ("ـ", ""),
+            ("-", " "), ("_", " "), (".", " "), ("،", " "), (",", " "),
+        ):
+            s = s.replace(a, b)
+        while "  " in s:
+            s = s.replace("  ", " ")
+        return s.strip()
+
+    def resolve_equipment_name(self, raw_name: str) -> tuple[str | None, str]:
+        """Map free-text Persian/English name to item_code. Returns (code|None, note)."""
+        n = self._normalize_eq_name(raw_name)
+        if not n:
+            return None, "خالی"
+        # explicit aliases (user-friendly)
+        aliases = {
+            "بی2": "a_b2", "بی 2": "a_b2", "b2": "a_b2", "b-2": "a_b2", "بمب افکن b2": "a_b2", "بمبافکن b2": "a_b2",
+            "بی52": "a_b52", "بی 52": "a_b52", "b52": "a_b52", "b-52": "a_b52",
+            "اف22": "a_f22", "اف 22": "a_f22", "f22": "a_f22", "f-22": "a_f22",
+            "اف35": "a_f35", "اف 35": "a_f35", "f35": "a_f35", "f-35": "a_f35",
+            "اف16": "a_f16", "اف 16": "a_f16", "f16": "a_f16", "f-16": "a_f16",
+            "اف15": "a_f15", "f15": "a_f15", "f-15": "a_f15",
+            "ناو جرالد فورد": "s_carrier", "جرالد فورد": "s_carrier", "ناو هواپیمابر": "s_carrier", "gerald ford": "s_carrier",
+            "ناوچه رزمی": "s_frigate", "ناوچه": "s_frigate",
+            "گشت دریایی": "s_patrol", "گشت ساحلی": "s_patrol", "گشتساحلی": "s_patrol",
+            "پیاده نظام آلمان": "g_inf_de", "پیاده نظام المان": "g_inf_de", "پیادهنظام آلمان": "g_inf_de",
+            "پیاده نظام امریکا": "g_inf_us", "پیاده نظام آمریکا": "g_inf_us", "پیادهنظام آمریکا": "g_inf_us",
+            "پیاده نظام ایران": "g_inf_ir", "پیاده نظام روسیه": "g_inf_ru", "پیاده نظام سبک": "g_inf",
+            "تانک خفن رندوم": "RANDOM_TANK", "تانک رندوم": "RANDOM_TANK", "تانک تصادفی": "RANDOM_TANK",
+            "تانک آبرامز": "g_tank_abrams", "تانک تی90": "g_tank_t90", "تانک تی-90": "g_tank_t90",
+            "بمب اتم": "nuke_bomb", "بمب اتمی": "nuke_bomb", "اتوم بمب": "nuke_bomb",
+            "پالایشگاه نفت بزرگ": "b_refinery_l", "پالایشگاه بزرگ": "b_refinery_l",
+            "پالایشگاه نفت": "b_refinery_m", "پالایشگاه عادی": "b_refinery_m", "پالایشگاه متوسط": "b_refinery_m",
+            "پالایشگاه کوچک": "b_refinery_s",
+            "معدن الماس": "res_rare", "الماس": "res_rare",
+            "معدن طلا": "res_gold", "طلا": "res_gold",
+            "مجتمع کشاورزی": "b_port_trade",  # closest productive infra if farm missing
+            "نفت": "res_oil", "اورانیوم": "res_uranium",
+        }
+        if n in aliases:
+            code = aliases[n]
+            if code == "RANDOM_TANK":
+                tanks = [c["item_code"] for c in self._cat.values() if "tank" in c["item_code"] or c["item_code"] == "g_armor"]
+                if not tanks:
+                    tanks = ["g_armor"]
+                import random as _r
+                return _r.choice(tanks), "تانک تصادفی"
+            return code, self._cat.get(code, {}).get("name_fa", code)
+        # contains match on aliases keys
+        for key, code in sorted(aliases.items(), key=lambda x: -len(x[0])):
+            if key in n or n in key:
+                if code == "RANDOM_TANK":
+                    tanks = [c["item_code"] for c in self._cat.values() if "tank" in c["item_code"] or c["item_code"] == "g_armor"]
+                    import random as _r
+                    return _r.choice(tanks or ["g_armor"]), "تانک تصادفی"
+                return code, self._cat.get(code, {}).get("name_fa", code)
+        # catalog name_fa / name_en / item_code fuzzy
+        best = None
+        best_score = 0
+        for code, meta in self._cat.items():
+            names = [
+                self._normalize_eq_name(meta.get("name_fa") or ""),
+                self._normalize_eq_name(meta.get("name_en") or ""),
+                self._normalize_eq_name(code),
+                self._normalize_eq_name((meta.get("name_en") or "").replace("-", " ")),
+            ]
+            for nm in names:
+                if not nm:
+                    continue
+                if n == nm:
+                    return code, meta.get("name_fa") or code
+                if n in nm or nm in n:
+                    score = len(nm)
+                    if score > best_score:
+                        best_score = score
+                        best = code
+        if best:
+            return best, self._cat[best].get("name_fa") or best
+        return None, "شناخته نشد"
+
+    def parse_equipment_grant_text(self, text: str) -> tuple[list[tuple[str, float, str]], list[str]]:
+        """Parse multiline grant text -> ([(item_code, qty, label)], unknown_lines)."""
+        import re
+        lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+        ok, bad = [], []
+        for ln in lines:
+            raw = ln.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+            m = re.match(r"^\s*(\d+(?:[.,]\d+)?)\s*(?:تا|x|×)?\s*(.+)$", raw, re.I)
+            if m:
+                qty = float(m.group(1).replace(",", "."))
+                name = m.group(2).strip()
+            else:
+                qty = 1.0
+                name = raw
+            # strip leading "تا "
+            name = re.sub(r"^(تا\s+)", "", name.strip())
+            code, label = self.resolve_equipment_name(name)
+            if not code or code not in self._cat:
+                bad.append(ln)
+                continue
+            if qty <= 0 or qty > 100000:
+                bad.append(ln + " (تعداد نامعتبر)")
+                continue
+            ok.append((code, qty, label))
+        return ok, bad
+
+    async def admin_grant_equipment_text(self, actor: int, target_player_id: int, text: str) -> str:
+        """Owner grants many items to a player's country from free-form Persian text."""
+        if not self.is_owner(int(actor)):
+            raise GameError("فقط مالک")
+        target_player_id = int(target_player_id)
+        code = await self.resolve_country_for_player(target_player_id)
+        if not code:
+            # fallback ng_players.country_code
+            p = await self.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (target_player_id,))
+            code = (p or {}).get("country_code")
+        if not code:
+            raise GameError("این بازیکن کشور فعال ندارد. اول کشور داشته باشد یا ریکاوری شود.")
+        parsed, bad = self.parse_equipment_grant_text(text)
+        if not parsed and bad:
+            raise GameError("هیچ قلم معتبری پیدا نشد:\n- " + "\n- ".join(bad[:12]))
+        added = []
+        async with self.db.transaction() as tx:
+            for item, qty, label in parsed:
+                meta = self._cat.get(item) or {}
+                inv = await tx.fetchrow(
+                    "SELECT quantity FROM ng_inventory WHERE country_code=$1 AND item_code=$2",
+                    (code, item),
+                )
+                if inv:
+                    await tx.execute(
+                        "UPDATE ng_inventory SET quantity=$1 WHERE country_code=$2 AND item_code=$3",
+                        (float(inv["quantity"]) + float(qty), code, item),
+                    )
+                else:
+                    await tx.execute(
+                        "INSERT INTO ng_inventory (country_code, item_code, quantity) VALUES ($1,$2,$3)",
+                        (code, item, float(qty)),
+                    )
+                if int(meta.get("is_building") or 0):
+                    now = datetime.now(timezone.utc).isoformat()
+                    for _ in range(int(qty)):
+                        nid = await tx.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM ng_buildings")
+                        await tx.execute(
+                            "INSERT INTO ng_buildings (id, country_code, building_code, level, built_at, active) VALUES ($1,$2,$3,1,$4,1)",
+                            (int(nid["id"]), code, item, now),
+                        )
+                added.append(f"• {label}: +{int(qty) if float(qty).is_integer() else qty}")
+        try:
+            await self.recalc_income(code)
+        except Exception:
+            log.exception("recalc after grant")
+        await self.admin_log(int(actor), "grant_eq_text", f"player={target_player_id} country={code} n={len(parsed)}")
+        cname = await self.country_label(code)
+        msg = f"✅ تجهیزات به {cname} اضافه شد:\n" + "\n".join(added)
+        if bad:
+            msg += "\n\n⚠️ این خطوط شناخته نشدند:\n- " + "\n- ".join(bad[:12])
+        return msg
+
     async def admin_take_item(self, actor: int, code: str, item: str, qty: float) -> str:
         if not self.is_owner(actor):
             raise GameError("مجاز نیستید")

@@ -2808,6 +2808,35 @@ def register_handlers(bot, app_ctx: dict):
                 await out(await game.world_status_text(for_owner=owner))
                 return
 
+            if data.startswith("ng:oueq:"):
+                try:
+                    tid = int(str(data).split(":")[-1])
+                except Exception:
+                    await out("❌ شناسه نامعتبر")
+                    return
+                code = await game.resolve_country_for_player(tid)
+                if not code:
+                    p = await game.db.fetchrow("SELECT country_code FROM ng_players WHERE player_id=$1", (tid,))
+                    code = (p or {}).get("country_code")
+                if not code:
+                    await out("❌ این بازیکن کشور ندارد. اول کشور/ریکاوری لازم است.")
+                    return
+                _pending[pid] = {"kind": "owner_eq_grant", "target": tid, "code": code}
+                await out(
+                    "🪖 تنظیم تجهیزات\n\n"
+                    f"بازیکن: {tid}\nکشور: {await game.country_label(code)}\n\n"
+                    "لیست را مثل نمونه بفرست (هر خط یک قلم):\n\n"
+                    "۱۰ تا بی۲\n"
+                    "۱۰ تا اف۲۲\n"
+                    "ناو جرالد فورد\n"
+                    "۵ تا ناوچه رزمی\n"
+                    "۲ تا بمب اتم\n"
+                    "۳ تا پالایشگاه نفت\n\n"
+                    "برای لغو: لغو",
+                    ik([[("❌ انصراف", f"ng:ou:{tid}")]]),
+                )
+                return
+
             if data.startswith("ng:dcd:"):
                 try:
                     tid = int(str(data).split(":")[-1])
@@ -3418,6 +3447,7 @@ def register_handlers(bot, app_ctx: dict):
                     [("🧬 جان ×۲ روشن", f"ng:oudblon:{tid}"), ("🧬 جان ×۲ خاموش", f"ng:oudbloff:{tid}")],
                     [("⏱ رفع محدودیت ۳۰دقیقه", f"ng:dcd:{tid}")],
                     [("♻️ ریکاوری ۳ ساعته", f"ng:orec:{tid}")],
+                    [("🪖 تنظیم تجهیزات", f"ng:oueq:{tid}")],
                     [("♻️ ریست کردن کاربر", f"ng:oureset:{tid}")],
                     [("⬅️ لیست کاربران", "ng:o:players:0")],
                 ]
