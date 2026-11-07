@@ -15,6 +15,7 @@ from modules.ng import equipment as eq
 from modules.ng.legendary import LegendaryService, LegendaryError
 from modules.ng.alliances import AllianceService, AllianceError, create_cost, DESTROY_WAIT_SEC
 from modules.ng.control import ControlService, ControlError
+from modules.ng.donations import DonationService, DonationError
 
 log = logging.getLogger(__name__)
 TEHRAN = ZoneInfo("Asia/Tehran")

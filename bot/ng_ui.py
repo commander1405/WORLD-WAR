@@ -47,34 +47,58 @@ BTN_DONATE = "💎 حمایت مالی"
 _pending: dict[int, dict] = {}
 
 
+_nav_stack: dict[int, list[str]] = {}
+
+
+def nav_push(pid: int, screen: str) -> None:
+    st = _nav_stack.setdefault(int(pid), [])
+    if not st or st[-1] != screen:
+        st.append(screen)
+    if len(st) > 16:
+        del st[:-16]
+
+
+def nav_home(pid: int) -> None:
+    _nav_stack[int(pid)] = []
+
+
+def nav_back(pid: int) -> str | None:
+    st = _nav_stack.get(int(pid)) or []
+    if st:
+        st.pop()
+    return st[-1] if st else None
+
+
 def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
+    """Compact main menu — owner button only for owner."""
     kb = MenuKeyboardMarkup()
     rows = [
-        [BTN_REF, BTN_ALLY],
         [BTN_MY, BTN_ECO],
-        [BTN_WORKSHOP, BTN_SHOP],
-        [BTN_INV, BTN_MKT],
-        [BTN_TRADE, BTN_DIPLO],
+        [BTN_SHOP, BTN_INV],
+        [BTN_WORKSHOP, BTN_ATTACK],
+        [BTN_ALLY, BTN_DIPLO],
+        [BTN_MKT, BTN_TRADE],
         [BTN_TREATY, BTN_WALLET],
-        [BTN_ATTACK, BTN_STMT],
-        [BTN_WORLD, BTN_REPORT],
-        [BTN_ABOUT, BTN_GUIDE],
-        [BTN_DONATE, BTN_PICK],
+        [BTN_STMT, BTN_WORLD],
+        [BTN_REPORT, BTN_GUIDE],
+        [BTN_REF, BTN_DONATE],
+        [BTN_PICK, BTN_ABOUT],
     ]
-    # dedupe texts while preserving order (fixes accidental double wallet)
+    if is_owner:
+        rows.append([BTN_OWNER])
     seen = set()
     clean = []
     for row in rows:
         nr = []
-        for t in row:
-            if t and t not in seen:
-                seen.add(t)
-                nr.append(t)
+        for label in row:
+            if label and label not in seen:
+                seen.add(label)
+                nr.append(label)
         if nr:
             clean.append(nr)
     for i, row in enumerate(clean, 1):
-        for t in row:
-            kb.add(MenuKeyboardButton(t), row=i)
+        for label in row:
+            kb.add(MenuKeyboardButton(label), row=i)
     return kb
 
 
@@ -88,11 +112,12 @@ def ik(rows: list) -> InlineKeyboardMarkup:
 
 
 def back_row():
-    return [("🔙 بازگشت", "ng:home")]
+    """Back goes to previous screen; Home goes to main menu."""
+    return [("🔙 بازگشت", "ng:back"), ("🏠 خانه", "ng:home")]
 
 
 def cancel_row():
-    return [("❌ انصراف", "ng:cancel"), ("🔙 منوی اصلی", "ng:home")]
+    return [("❌ انصراف", "ng:cancel"), ("🏠 خانه", "ng:home")]
 
 
 MENU_TEXTS = {
@@ -437,10 +462,11 @@ def register_handlers(bot, app_ctx: dict):
                     await reply(message, "❌ خطا در برداشت")
                 return
 
-            if text in ("/admin", "/owner", "/panel"):
+            if text in ("/admin", "/owner", "/panel", BTN_OWNER):
                 if not owner:
                     await reply(message, "❌ دسترسی مجاز نیست.")
                     return
+                nav_push(pid, "owner")
                 rows = [
                     [("بازیکنان", "ng:o:players"), ("وضعیت جهان", "ng:o:world")],
                     [("🌐 مدیریت اتحادها", "ng:oally"), ("📊 آمار دعوت", "ng:orefstats")],
@@ -1033,6 +1059,7 @@ def register_handlers(bot, app_ctx: dict):
                 except Exception:
                     log.exception("record_start")
                 start_msg = await game.get_setting("start_message", game.DEFAULT_START)
+                nav_home(pid)
                 await reply(message, start_msg, main_kb(owner))
                 return
 
@@ -1071,6 +1098,7 @@ def register_handlers(bot, app_ctx: dict):
                 if not code:
                     await reply(message, "ابتدا «انتخاب کشور» را بزنید.", main_kb(owner))
                     return
+                nav_push(pid, "country")
                 card = await game.country_card(code)
                 rows = [
                     [("🏛 کنترل کشور", "ng:ctrl")],
@@ -1104,6 +1132,7 @@ def register_handlers(bot, app_ctx: dict):
                 if not code:
                     await reply(message, "ابتدا کشور انتخاب کنید.", main_kb(owner))
                     return
+                nav_push(pid, "eco")
                 await reply(message, await game.economy_card(code), main_kb(owner))
                 return
 
@@ -1453,10 +1482,46 @@ def register_handlers(bot, app_ctx: dict):
 
             if data in ("ng:home", "ng:busy", "ng:cancel"):
                 _pending.pop(pid, None)
-                await out(
-                    "منوی اصلی — وضعیت قبلی لغو شد." if data != "ng:busy" else "این کشور دارای بازیکن است.",
-                    main_kb(owner),
-                )
+                nav_home(pid)
+                if data == "ng:busy":
+                    await out("این کشور دارای بازیکن است.", main_kb(owner))
+                elif data == "ng:cancel":
+                    await out("عملیات لغو شد.", main_kb(owner))
+                else:
+                    await out("🏠 منوی اصلی", main_kb(owner))
+                return
+
+            if data == "ng:back":
+                prev = nav_back(pid)
+                _pending.pop(pid, None)
+                if not prev:
+                    nav_home(pid)
+                    await out("🏠 منوی اصلی", main_kb(owner))
+                    return
+                # Re-open previous high-level screens
+                if prev == "country" and code:
+                    card = await game.country_card(code)
+                    rows = [
+                        [("🏛 کنترل کشور", "ng:ctrl")],
+                        [("📦 انبار", "ng:go:inv"), ("💰 اقتصاد", "ng:go:eco")],
+                        [("📜 گزارش", "ng:go:rep")],
+                        back_row(),
+                    ]
+                    await out(card, ik(rows))
+                    return
+                if prev == "eco" and code:
+                    await out(await game.economy_card(code), main_kb(owner))
+                    return
+                if prev == "shop":
+                    await out("🛒 فروشگاه", ik([
+                        [("📦 دسته‌ها", "ng:shop")],
+                        back_row(),
+                    ]))
+                    return
+                if prev == "owner" and owner:
+                    await out("🛡 پنل مالک — از کیبورد «پنل مالک» وارد شوید.", main_kb(True))
+                    return
+                await out(f"بازگشت از بخش قبلی.", main_kb(owner))
                 return
 
             # ---- Alliance System 2.0 callbacks ----
