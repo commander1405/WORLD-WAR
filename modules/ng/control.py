@@ -489,8 +489,8 @@ class ControlService:
             "law",
             f"📜 قانون «{law['title']}» از {await self.g.country_label(law['country_code'])} تصویب شد.",
         )
-        return f"✅ قانون #{lid} تصویب شد." + (f"
-📈 پاداش درآمد روزانه (جدا از پاداش نقدی ثبت): {int(income_bonus):,}" if income_bonus else "")
+        return f"✅ قانون #{lid} تصویب شد." + (f"\n📈 پاداش درآمد روزانه: {int(income_bonus):,}" if income_bonus else "")
+
 
     async def pending_laws(self) -> list[dict]:
         return await self.db.fetch(
